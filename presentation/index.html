@@ -173,7 +173,7 @@
   </section>
 
   <!-- 4 — GENERATIVE / COMPOSABLE -->
-  <section class="slide" data-notes="The interesting transforms are generative — run an agent over the incoming change. Agents are composed in Starlark, the language Bazel and Buck2 shops already use. Pick a harness, a model, template the prompt — all as code, swappable. The output is captured as a content-addressed patch, so it stays reproducible. Then go to the demo.">
+  <section class="slide" data-notes="The interesting transforms are generative — run an agent over the incoming change. Agents are composed in Starlark, the language Bazel and Buck2 shops already use. Pick a harness, a model, template the prompt — all as code, swappable. The output is captured as a content-addressed patch, so it stays reproducible. Side effect (footer): because it's config-as-code and the output is reproducible, you can replay your history through different agents and models to benchmark cost/speed/quality, and git-bisect to find regressions. Then go to the demo.">
     <div class="kicker">Technical · the transform engine</div>
     <h2>Agents as <span class="em">composable config</span></h2>
     <div class="sub small">Skip imperative — the interesting part is generative: run an agent with source + the change as context. Composed in <b style="color:var(--fg)">Starlark</b>, familiar to Bazel / Buck2 shops.</div>
@@ -187,6 +187,11 @@
       <span class="tag">harness × model × prompt</span>
       <span class="tag">output → content-addressed patch</span>
       <span class="tag">reproducible</span>
+    </div>
+    <div class="legend small" style="margin-top:1.5vh; border-top:1px solid var(--line); padding-top:1.5vh">
+      <b style="color:var(--accent2)">Side effect:</b> config-as-code + reproducible output lets you
+      📊 <span class="i">replay history</span> to benchmark agents/models (cost·speed·quality)
+      and 🐛 <span class="i"><code>git bisect</code></span> regressions.
     </div>
   </section>
 
@@ -215,7 +220,7 @@
   </section>
 
   <!-- 6 — WHAT'S NEXT -->
-  <section class="slide" data-notes="Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits. And a side effect of config-as-code plus reproducible transforms: replay your own history through different agents and models to benchmark cost, speed, and quality — and because it's all normal Git history, you can bisect to find which change broke something.">
+  <section class="slide" data-notes="Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits.">
     <div class="kicker">Roadmap</div>
     <h2>What's <span class="em">next</span></h2>
     <ul>
@@ -224,13 +229,6 @@
       <li><span class="hl">Broaden the triggers</span> — bug reports, metric anomalies, production alerts</li>
       <li><span class="hl">Richer source rules</span> — import by commit / tag · export by PR / straight to main</li>
     </ul>
-    <div class="panel" style="border-color:rgba(92,207,230,.45); background:rgba(92,207,230,.06)">
-      <h3 style="color:var(--accent2)">Side effect — free benchmarking &amp; debugging</h3>
-      <ul>
-        <li>📊 <span class="hl2">Replay historical commits</span> through different harness / model / prompt setups → compare <b style="color:var(--fg)">cost · speed · quality</b></li>
-        <li>🐛 <span class="hl2">Bisect</span> the mirror — it's ordinary Git history, so <code>git bisect</code> pins which imported change (or agent revision) caused a regression</li>
-      </ul>
-    </div>
   </section>
 
   <!-- 7 — DEMO -->

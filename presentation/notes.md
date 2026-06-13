@@ -36,6 +36,7 @@ If you run long, cut from slides 1 and 6 — never from slide 3.
 ## Slide 4 — Generative + composable · 0:25
 **Say:** "The interesting transforms are generative — run an agent over the incoming change. And agents are composed in Starlark, the language Bazel and Buck2 shops already use. Pick a harness, a model, template the prompt — all as code, swappable. The output is captured as a content-addressed patch, so the import stays reproducible."
 **Point at:** the three pills (harness × model × prompt / content-addressed / reproducible).
+**Footer side-note (if time):** "A side effect: because it's config-as-code and the output's reproducible, you can replay your history through different agents and models to benchmark cost, speed, and quality — and git-bisect to find which change broke something."
 **Transition:** "Here's the demo." → (run demo now, or after slide 6 — your call; see Demo section).
 
 ## Slide 5 — Use cases · 0:15
@@ -44,7 +45,6 @@ If you run long, cut from slides 1 and 6 — never from slide 3.
 
 ## Slide 6 — What's next · 0:10
 **Say:** "Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits."
-**Side-note callout (point at the box):** "And a side effect of config-as-code plus reproducible transforms: replay your own history through different agents and models to benchmark cost, speed, and quality — and because it's all normal Git history, you can bisect to find which change broke something."
 **Close line:** "Import runs end-to-end today; export is the next edge, and it reuses all the same machinery."
 
 ---
