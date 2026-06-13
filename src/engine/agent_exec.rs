@@ -9,7 +9,8 @@
 //! that patch deterministically (see `docs/design/transformations.md`,
 //! "Materialization and the content-addressed cache").
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 
@@ -220,5 +221,149 @@ impl AgentRunner for RemoteRunner<'_> {
     }
 }
 
+/// A deterministic, hermetic [`AgentRunner`] for demos, evals, and tests.
+///
+/// Instead of calling a real model, it runs a recorded shell script that makes
+/// the *same* edits a coding agent would — so the full materialize → diff →
+/// cache → replay loop runs with **no model access, no network, and zero cost**,
+/// yet exercises the exact production code path (the engine cannot tell a fixture
+/// runner from a live one). Each agent's script is `<dir>/<name>.sh`, where
+/// `<name>` is the agent label's target (`//tools/agent:porter` → `porter`).
+///
+/// The script runs with the checked-out subtree as its CWD and sees the rendered
+/// prompt in `$CAPYFUN_AGENT_PROMPT`, so a fixture can branch on the verifier
+/// feedback [`VerifyingRunner`] appends on a retry. This is a **mock** by
+/// construction — callers label its output as such (e.g. `fixture/mock`).
+pub struct FixtureRunner {
+    dir: PathBuf,
+}
+
+impl FixtureRunner {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        FixtureRunner { dir: dir.into() }
+    }
+
+    /// The fixture script stem for an agent label: the part after the last `:` or
+    /// `/`, e.g. `//tools/agent:porter` → `porter`.
+    fn script_name(agent_id: &str) -> &str {
+        agent_id.rsplit([':', '/']).next().unwrap_or(agent_id)
+    }
+}
+
+impl AgentRunner for FixtureRunner {
+    fn run(&self, inv: &AgentInvocation, prompt: &str, workdir: &Path) -> Result<()> {
+        let name = Self::script_name(&inv.agent_id);
+        let script = self.dir.join(format!("{name}.sh"));
+        if !script.exists() {
+            anyhow::bail!(
+                "fixture agent script for {} not found: expected {}",
+                inv.agent_id,
+                script.display()
+            );
+        }
+        let output = Command::new("sh")
+            .arg(&script)
+            .current_dir(workdir)
+            .env("CAPYFUN_AGENT_PROMPT", prompt)
+            .env("CAPYFUN_AGENT_ID", &inv.agent_id)
+            .output()
+            .with_context(|| format!("running fixture agent script {}", script.display()))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "fixture agent {} script {} exited with {}: {}",
+                inv.agent_id,
+                script.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Wraps another [`AgentRunner`] with a **verify → retry** loop.
+///
+/// After the agent edits the subtree, a verifier command runs in the same working
+/// directory; on failure its combined output is fed back to the agent (appended
+/// to the prompt) and the agent runs again, up to `max_retries` times. This is
+/// the "agent edits → verifier runs → on failure feed stderr+diff back → retry →
+/// materialize" loop from `docs/design/transformations.md`, made real.
+///
+/// The verifier runs via `sh -c <cmd>`, so it can be any shell command (e.g.
+/// `go test ./...`). Because the engine computes the cache key from the
+/// *original* rendered prompt before calling the runner, the retry feedback never
+/// changes cache identity: the materialized patch is the final, **verified**
+/// state, and replays are still free.
+pub struct VerifyingRunner<'a> {
+    inner: &'a dyn AgentRunner,
+    verify: String,
+    max_retries: usize,
+}
+
+impl<'a> VerifyingRunner<'a> {
+    pub fn new(inner: &'a dyn AgentRunner, verify: impl Into<String>, max_retries: usize) -> Self {
+        VerifyingRunner {
+            inner,
+            verify: verify.into(),
+            max_retries,
+        }
+    }
+
+    /// Run the configured verifier in `workdir`, returning `(ok, combined output)`.
+    fn verify_in(&self, workdir: &Path) -> Result<(bool, String)> {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&self.verify)
+            .current_dir(workdir)
+            .output()
+            .with_context(|| format!("running verifier `{}`", self.verify))?;
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            String::from_utf8_lossy(&out.stderr).trim_end()
+        );
+        Ok((out.status.success(), combined.trim().to_owned()))
+    }
+}
+
+impl AgentRunner for VerifyingRunner<'_> {
+    fn run(&self, inv: &AgentInvocation, prompt: &str, workdir: &Path) -> Result<()> {
+        let mut current = prompt.to_owned();
+        for attempt in 0..=self.max_retries {
+            self.inner.run(inv, &current, workdir)?;
+            let (ok, output) = self.verify_in(workdir)?;
+            if ok {
+                if attempt > 0 {
+                    eprintln!("agent {}: verifier passed on retry {attempt}", inv.agent_id);
+                }
+                return Ok(());
+            }
+            if attempt == self.max_retries {
+                anyhow::bail!(
+                    "agent {}: verifier `{}` still failing after {} attempt(s):\n{output}",
+                    inv.agent_id,
+                    self.verify,
+                    attempt + 1
+                );
+            }
+            eprintln!(
+                "agent {}: verifier failed (attempt {}); feeding output back and retrying",
+                inv.agent_id,
+                attempt + 1
+            );
+            current = format!(
+                "{prompt}\n\n--- VERIFIER FAILED (attempt {}) ---\n{output}\n\
+                 Fix the code so the verifier (`{}`) passes.",
+                attempt + 1,
+                self.verify
+            );
+        }
+        unreachable!("the loop returns or bails on the last attempt")
+    }
+}
+
 #[cfg(test)]
 mod remote_runner_tests;
+
+#[cfg(test)]
+mod runner_tests;

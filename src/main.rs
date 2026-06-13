@@ -116,18 +116,25 @@ enum ExecutorArg {
     #[default]
     Local,
     Remote,
+    /// Deterministic, hermetic mock agent from recorded scripts (no model, no
+    /// network). Configured via `CAPYFUN_AGENT_FIXTURE` / `CAPYFUN_VERIFY`.
+    Fixture,
 }
 
 impl ExecutorArg {
     /// Resolve to a reconcile [`Executor`](capyfun::reconcile::Executor), reading
-    /// `BUILDBUDDY_*` from the environment for the remote case.
-    fn resolve(self) -> capyfun::reconcile::Executor {
-        match self {
+    /// `BUILDBUDDY_*` (remote) or `CAPYFUN_AGENT_FIXTURE` (fixture) from the
+    /// environment.
+    fn resolve(self) -> Result<capyfun::reconcile::Executor> {
+        Ok(match self {
             ExecutorArg::Local => capyfun::reconcile::Executor::Local,
             ExecutorArg::Remote => {
                 capyfun::reconcile::Executor::Remote(capyfun::reconcile::RemoteSettings::from_env())
             }
-        }
+            ExecutorArg::Fixture => capyfun::reconcile::Executor::Fixture(
+                capyfun::reconcile::FixtureSettings::from_env()?,
+            ),
+        })
     }
 }
 
@@ -418,7 +425,7 @@ fn run_reconcile(args: ReconcileArgs) -> Result<()> {
     };
 
     use capyfun::reconcile::{do_export, do_import, do_vendor};
-    let executor = args.executor.resolve();
+    let executor = args.executor.resolve()?;
     for i in &ir.imports {
         if target.is_none_or(|t| t == i.label) {
             run(&i.label, do_import(&repo, &ir, i, &args.root, args.refresh, &executor));
@@ -810,7 +817,7 @@ fn run_import(args: ImportArgs) -> Result<()> {
         import,
         &args.root,
         args.refresh,
-        &args.executor.resolve(),
+        &args.executor.resolve()?,
     )?;
     println!("{}: {summary}", import.label);
     Ok(())

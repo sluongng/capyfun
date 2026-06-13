@@ -7,7 +7,7 @@
 //! two cannot drift. Each action is idempotent — a no-op when there is nothing
 //! new — built on the engine's commit map.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use git2::Repository;
@@ -44,6 +44,48 @@ pub enum Executor {
     Local,
     /// Run the harness on a REAPI backend ([`crate::engine::RemoteRunner`]).
     Remote(RemoteSettings),
+    /// Run a deterministic, hermetic *mock* agent from recorded scripts
+    /// ([`crate::engine::FixtureRunner`]), optionally wrapped in a verify → retry
+    /// loop ([`crate::engine::VerifyingRunner`]). No model access, no network,
+    /// zero cost — for demos, evals, and tests. See [`FixtureSettings`].
+    Fixture(FixtureSettings),
+}
+
+/// Settings for the hermetic [`Fixture`](Executor::Fixture) executor.
+pub struct FixtureSettings {
+    /// Directory of recorded agent scripts (`<dir>/<agent-name>.sh`).
+    pub dir: PathBuf,
+    /// Optional verifier shell command run after each agent edit; when set, the
+    /// agent runs under a verify → retry loop.
+    pub verify: Option<String>,
+    /// Retries allowed before the verifier failure aborts the import.
+    pub retries: usize,
+}
+
+impl FixtureSettings {
+    /// Build from the environment: `CAPYFUN_AGENT_FIXTURE` (required, the script
+    /// directory), `CAPYFUN_VERIFY` (optional verifier command), and
+    /// `CAPYFUN_VERIFY_RETRIES` (optional, default 1).
+    pub fn from_env() -> Result<Self> {
+        let dir = std::env::var("CAPYFUN_AGENT_FIXTURE")
+            .map(PathBuf::from)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the `fixture` executor needs CAPYFUN_AGENT_FIXTURE set to a directory \
+                     of recorded agent scripts (`<agent>.sh`)"
+                )
+            })?;
+        let verify = std::env::var("CAPYFUN_VERIFY").ok().filter(|s| !s.is_empty());
+        let retries = std::env::var("CAPYFUN_VERIFY_RETRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        Ok(FixtureSettings {
+            dir,
+            verify,
+            retries,
+        })
+    }
 }
 
 /// Connection + placement settings for the remote executor.
@@ -155,6 +197,22 @@ pub fn do_import(
             let runner =
                 crate::engine::RemoteRunner::new(&client).with_platform(settings.platform.clone());
             run_import_engine(repo, import, origin_tip, branch_tip, &patches, &tips, refresh, &runner)?
+        }
+        Executor::Fixture(settings) => {
+            // A deterministic mock agent (recorded scripts), optionally wrapped in
+            // a verify → retry loop. The verifying runner borrows the fixture
+            // runner, so both live for this arm.
+            let fixture = crate::engine::FixtureRunner::new(settings.dir.clone());
+            match &settings.verify {
+                Some(cmd) => {
+                    let runner =
+                        crate::engine::VerifyingRunner::new(&fixture, cmd.clone(), settings.retries);
+                    run_import_engine(repo, import, origin_tip, branch_tip, &patches, &tips, refresh, &runner)?
+                }
+                None => run_import_engine(
+                    repo, import, origin_tip, branch_tip, &patches, &tips, refresh, &fixture,
+                )?,
+            }
         }
     };
 
