@@ -2,6 +2,9 @@
 
 **The code import / export engine for monorepos.**
 
+> The name: **`capyfun` == copy function** — it copies code across repo
+> boundaries (with a capybara having fun along the way).
+
 CapyFun moves code into and out of a monorepo while rewriting Git history so the
 result looks native on both sides. It is the import/export subsystem of
 [**tinytree**](https://tinytree.dev) — a forge built for monorepos.
