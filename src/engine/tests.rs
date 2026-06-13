@@ -267,3 +267,120 @@ fn origin_trailer_round_trips() {
     // No trailer present.
     assert_eq!(parse_origin_trailer("just a message"), None);
 }
+
+// --- M5: incremental import (mirror layer) ---
+
+/// Walk a mirror tip's first-parent chain, returning each commit's origin
+/// trailer SHA (newest first).
+fn mirror_origins(repo: &Repository, head: Oid) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = Some(head);
+    while let Some(c) = cur {
+        let commit = repo.find_commit(c).unwrap();
+        if let Some(sha) = parse_origin_trailer(commit.message().unwrap()) {
+            out.push(sha);
+        }
+        cur = commit.parent_ids().next();
+    }
+    out
+}
+
+#[test]
+fn imports_full_history_then_is_idempotent() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "c1\n", &[]);
+    let c2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "c2\n", &[c1]);
+    let c3 = commit(&repo, write_tree(&repo, &[("a", "3")]), "c3\n", &[c2]);
+
+    let first = import_mirror(&repo, "third_party/x", c3, None).unwrap();
+    assert_eq!(first.imported, 3);
+    let head = first.head.unwrap();
+
+    // Three linear mirror commits, oldest->newest mapping c1,c2,c3.
+    assert_eq!(
+        mirror_origins(&repo, head),
+        vec![c3.to_string(), c2.to_string(), c1.to_string()]
+    );
+    let tip_files = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    assert_eq!(tip_files.get("third_party/x/a").unwrap(), "3");
+
+    // Re-running with the same origin tip imports nothing.
+    let again = import_mirror(&repo, "third_party/x", c3, Some(head)).unwrap();
+    assert_eq!(again.imported, 0);
+    assert_eq!(again.head, Some(head));
+}
+
+#[test]
+fn imports_only_the_delta() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "c1\n", &[]);
+    let c2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "c2\n", &[c1]);
+
+    let first = import_mirror(&repo, "vendor", c2, None).unwrap();
+    assert_eq!(first.imported, 2);
+    let head = first.head.unwrap();
+
+    // Two new upstream commits.
+    let c3 = commit(&repo, write_tree(&repo, &[("a", "3")]), "c3\n", &[c2]);
+    let c4 = commit(&repo, write_tree(&repo, &[("a", "4")]), "c4\n", &[c3]);
+
+    let delta = import_mirror(&repo, "vendor", c4, Some(head)).unwrap();
+    assert_eq!(delta.imported, 2, "only c3, c4 are new");
+    let new_head = delta.head.unwrap();
+    assert_eq!(
+        mirror_origins(&repo, new_head),
+        vec![
+            c4.to_string(),
+            c3.to_string(),
+            c2.to_string(),
+            c1.to_string()
+        ]
+    );
+}
+
+#[test]
+fn linearizes_merges_to_first_parent() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "c1\n", &[]);
+    let c2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "c2\n", &[c1]);
+    // A feature branch off c1, not on the first-parent chain.
+    let f1 = commit(
+        &repo,
+        write_tree(&repo, &[("a", "1"), ("b", "feat")]),
+        "f1\n",
+        &[c1],
+    );
+    // Merge with first parent c2, second parent f1; merged tree has a=2 and b.
+    let merge = commit(
+        &repo,
+        write_tree(&repo, &[("a", "2"), ("b", "feat")]),
+        "merge\n",
+        &[c2, f1],
+    );
+
+    let out = import_mirror(&repo, "lib", merge, None).unwrap();
+    // First-parent chain merge->c2->c1 = 3 commits; f1 is NOT mirrored.
+    assert_eq!(out.imported, 3);
+    let head = out.head.unwrap();
+    let origins = mirror_origins(&repo, head);
+    assert!(
+        !origins.contains(&f1.to_string()),
+        "feature commit must not be mirrored"
+    );
+    // Merge content is still present (we mirror the merge's tree as-is).
+    let tip_files = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    assert_eq!(tip_files.get("lib/b").unwrap(), "feat");
+    assert_eq!(tip_files.get("lib/a").unwrap(), "2");
+}
+
+#[test]
+fn diverged_history_errors() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "c1\n", &[]);
+    let head = import_mirror(&repo, "x", c1, None).unwrap().head.unwrap();
+
+    // A fresh origin root with no relation to c1 (force-push simulation).
+    let other = commit(&repo, write_tree(&repo, &[("a", "z")]), "other\n", &[]);
+    let err = import_mirror(&repo, "x", other, Some(head)).unwrap_err();
+    assert!(format!("{err:#}").contains("no longer contains"), "{err:#}");
+}

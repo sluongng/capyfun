@@ -126,5 +126,86 @@ pub fn replay_commit(
     Ok(oid)
 }
 
+/// Outcome of a mirror import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportOutcome {
+    /// Number of origin commits mirrored this run.
+    pub imported: usize,
+    /// The resulting monorepo tip (unchanged from `base` when nothing imported).
+    pub head: Option<Oid>,
+}
+
+/// The last origin commit reflected in the monorepo, found by scanning the
+/// first-parent chain of `base` for the most recent `CapyFun-Origin` trailer.
+/// Returns `None` when nothing has been imported yet.
+fn last_imported_origin(repo: &Repository, base: Option<Oid>) -> Result<Option<Oid>> {
+    let mut cur = base;
+    while let Some(c) = cur {
+        let commit = repo.find_commit(c)?;
+        if let Some(sha) = parse_origin_trailer(commit.message().unwrap_or("")) {
+            let oid = Oid::from_str(&sha)
+                .with_context(|| format!("commit {c} has malformed {ORIGIN_TRAILER}: {sha}"))?;
+            return Ok(Some(oid));
+        }
+        cur = commit.parent_ids().next();
+    }
+    Ok(None)
+}
+
+/// First-parent commits strictly newer than `stop` on `tip`'s chain, ordered
+/// oldest → newest. When `stop` is `None`, returns the whole chain. Errors if
+/// `stop` is set but not on the chain (upstream history diverged / was rewritten).
+fn first_parent_delta(repo: &Repository, tip: Oid, stop: Option<Oid>) -> Result<Vec<Oid>> {
+    let mut chain = Vec::new();
+    let mut cur = Some(tip);
+    while let Some(c) = cur {
+        if Some(c) == stop {
+            chain.reverse();
+            return Ok(chain);
+        }
+        chain.push(c);
+        cur = repo.find_commit(c)?.parent_ids().next();
+    }
+    if stop.is_some() {
+        anyhow::bail!(
+            "origin tip {tip} no longer contains the last imported commit {} on its \
+             first-parent chain (was history rewritten / force-pushed?)",
+            stop.expect("checked")
+        );
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+/// Incrementally mirror the origin's first-parent history into `dest`.
+///
+/// Replays every first-parent commit newer than the last-imported one (read from
+/// `base`'s trailers) as a linear run of mirror commits on top of `base`. Merges
+/// are linearized to their first parent. Re-running with no new origin commits is
+/// a no-op. Returns the resulting tip; the caller advances any ref.
+pub fn import_mirror(
+    repo: &Repository,
+    dest: &str,
+    origin_tip: Oid,
+    base: Option<Oid>,
+) -> Result<ImportOutcome> {
+    let last = last_imported_origin(repo, base)?;
+    if Some(origin_tip) == last {
+        return Ok(ImportOutcome {
+            imported: 0,
+            head: base,
+        });
+    }
+    let to_import = first_parent_delta(repo, origin_tip, last)?;
+    let mut head = base;
+    for origin in &to_import {
+        head = Some(replay_commit(repo, dest, *origin, head)?);
+    }
+    Ok(ImportOutcome {
+        imported: to_import.len(),
+        head,
+    })
+}
+
 #[cfg(test)]
 mod tests;
