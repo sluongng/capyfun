@@ -26,6 +26,7 @@ use starlark::any::ProvidesStaticType;
 use starlark::environment::{FrozenModule, Globals, GlobalsBuilder, Module};
 use starlark::eval::{Evaluator, FileLoader};
 use starlark::syntax::{AstModule, Dialect};
+use starlark::values::dict::DictRef;
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
 use starlark::values::{starlark_value, NoSerialize, StarlarkValue, Value, ValueLike};
@@ -169,6 +170,27 @@ pub enum TransformSpec {
         strip_trailers: Vec<String>,
         add_trailers: Vec<String>,
     },
+    /// Apply a static unified-diff patch file (tip phase). The path is relative
+    /// to the declaring SRC package, like the `patches = [...]` sugar.
+    ApplyPatch { file: String },
+    /// Run a coding agent over the imported subtree and capture its edits as a
+    /// patch (tip phase). `agent` and the prompt's template are labels.
+    AgentTransform {
+        agent: String,
+        prompt: PromptSpec,
+        paths: Vec<String>,
+    },
+}
+
+/// A bound prompt: a `prompt_template` target label plus call-site `vars`.
+/// `vars` values are literal strings or `//`-anchored label references (e.g. a
+/// file label); ordering is normalized (sorted by key) for determinism.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromptSpec {
+    /// Label of the `prompt_template` rule this prompt binds.
+    pub template: String,
+    /// Ordered (key, value) vars bound at the call site.
+    pub vars: Vec<(String, String)>,
 }
 
 impl TransformSpec {
@@ -179,8 +201,68 @@ impl TransformSpec {
             TransformSpec::Move { .. } => "move",
             TransformSpec::Copy { .. } => "copy",
             TransformSpec::RewriteMessage { .. } => "rewrite_message",
+            TransformSpec::ApplyPatch { .. } => "apply_patch",
+            TransformSpec::AgentTransform { .. } => "agent_transform",
         }
     }
+}
+
+/// A heap-allocated Starlark value carrying a bound [`PromptSpec`], returned by
+/// the `template()` constructor and consumed by `agent_transform(prompt = ...)`.
+/// Like [`TransformValue`], it holds only owned `'static` data so it survives
+/// `freeze()` and may be built in a `.scl` library.
+#[derive(Debug, Clone, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative)]
+pub struct PromptValue {
+    #[allocative(skip)]
+    spec: PromptSpec,
+}
+
+impl std::fmt::Display for PromptValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<prompt {}>", self.spec.template)
+    }
+}
+
+starlark_simple_value!(PromptValue);
+
+#[starlark_value(type = "prompt")]
+impl<'v> StarlarkValue<'v> for PromptValue {}
+
+impl PromptValue {
+    /// Pull a [`PromptSpec`] out of a Starlark value, erroring if it is not a
+    /// `template(...)` value.
+    fn unpack(value: Value) -> Result<PromptSpec> {
+        value
+            .downcast_ref::<PromptValue>()
+            .map(|p| p.spec.clone())
+            .with_context(|| {
+                format!(
+                    "agent_transform `prompt` is `{}`, not a template; use template(...)",
+                    value.get_type()
+                )
+            })
+    }
+}
+
+/// Unpack a Starlark `vars = {...}` dict into sorted `(key, value)` string pairs.
+/// Both keys and values must be strings; ordering is normalized by key so the
+/// lowered IR is deterministic regardless of literal order.
+fn unpack_vars(value: Value) -> Result<Vec<(String, String)>> {
+    let dict = DictRef::from_value(value).with_context(|| {
+        format!("template `vars` is `{}`, not a dict", value.get_type())
+    })?;
+    let mut out = Vec::with_capacity(dict.len());
+    for (k, v) in dict.iter() {
+        let key = k
+            .unpack_str()
+            .with_context(|| format!("template var key `{k}` is not a string"))?;
+        let val = v
+            .unpack_str()
+            .with_context(|| format!("template var `{key}` value `{v}` is not a string"))?;
+        out.push((key.to_owned(), val.to_owned()));
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// A heap-allocated Starlark value carrying a [`TransformSpec`].
@@ -464,6 +546,53 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
                 regex,
                 strip_trailers: strip_trailers.items,
                 add_trailers: add_trailers.items,
+            })),
+        )
+    }
+
+    /// Apply a static unified-diff patch file (tip phase). The path is relative
+    /// to the declaring SRC package.
+    fn apply_patch<'v>(
+        #[starlark(require = pos)] file: String,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(heap.alloc(TransformValue::new(TransformSpec::ApplyPatch { file })))
+    }
+
+    /// Bind a `prompt_template` target (by label) to call-site `vars`, producing
+    /// a prompt value for `agent_transform(prompt = ...)`. Pure: records nothing.
+    fn template<'v>(
+        #[starlark(require = pos)] prompt_template: String,
+        #[starlark(require = named)] vars: Option<Value<'v>>,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let vars = match vars {
+            Some(v) => unpack_vars(v)?,
+            None => Vec::new(),
+        };
+        Ok(heap.alloc(PromptValue {
+            spec: PromptSpec {
+                template: prompt_template,
+                vars,
+            },
+        }))
+    }
+
+    /// Run a coding agent over the imported subtree and capture its edits as a
+    /// patch (tip phase). `agent` is an `agent` rule label; `prompt` is a
+    /// `template(...)` value; `paths` optionally scopes the agent's view.
+    fn agent_transform<'v>(
+        #[starlark(require = named)] agent: String,
+        #[starlark(require = named)] prompt: Value<'v>,
+        #[starlark(require = named, default = UnpackList::default())] paths: UnpackList<String>,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        let prompt = PromptValue::unpack(prompt)?;
+        Ok(
+            heap.alloc(TransformValue::new(TransformSpec::AgentTransform {
+                agent,
+                prompt,
+                paths: paths.items,
             })),
         )
     }

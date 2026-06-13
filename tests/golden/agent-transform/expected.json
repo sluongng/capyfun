@@ -1,0 +1,75 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "github_import",
+      "name": "widget",
+      "repo": "acme/widget",
+      "ref": "refs/heads/main",
+      "into": null,
+      "patches": [],
+      "transforms": [
+        {
+          "transform": "move",
+          "src": "pkg",
+          "dst": "lib"
+        },
+        {
+          "transform": "apply_patch",
+          "file": "patches/0001-pin-toolchain.patch"
+        },
+        {
+          "transform": "agent_transform",
+          "agent": "//tools/agent:porter",
+          "prompt": {
+            "template": "//tools/agent/prompts:port",
+            "vars": [
+              [
+                "style",
+                "//docs:STYLE.md"
+              ]
+            ]
+          },
+          "paths": [
+            "lib/**"
+          ]
+        }
+      ],
+      "package": "//third_party/widget"
+    },
+    {
+      "kind": "agent",
+      "name": "porter",
+      "harness": "//tools/harness:codex",
+      "model": "//tools/models:gpt",
+      "package": "//tools/agent"
+    },
+    {
+      "kind": "prompt_template",
+      "name": "port",
+      "src": "port.tmpl",
+      "package": "//tools/agent/prompts"
+    },
+    {
+      "kind": "harness",
+      "name": "codex",
+      "kind": "codex",
+      "plugins": [],
+      "skills": [],
+      "package": "//tools/harness"
+    },
+    {
+      "kind": "model",
+      "name": "gpt",
+      "provider": "openai",
+      "id": "gpt-5.5",
+      "credential": null,
+      "package": "//tools/models"
+    }
+  ]
+}

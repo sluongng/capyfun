@@ -1,9 +1,13 @@
 # Root SRC for the transforms showcase monorepo.
 #
-# NOTE: This example is a forward-looking SYNTAX PREVIEW. The transform and
-# agent builtins it uses land in the milestones in
-# docs/design/transformations.md (T1-T5); `capyfun config` cannot evaluate it
-# yet. See examples/monorepo for the currently-evaluable example.
+# This example now EVALUATES and statically validates end to end:
+#   capyfun check --root examples/transforms
+# The transform and agent tool builtins (replace/move/copy/rewrite_message,
+# apply_patch, agent_transform/template, and the harness/model/agent/
+# prompt_template rules) are implemented (T1-T4). Structural transforms also
+# apply during `capyfun import`. The remaining piece is generative execution
+# (T5): actually running an agent_transform and materializing its output to a
+# content-addressed patch. See docs/design/transformations.md.
 
 monorepo(
     name = "tinytree",

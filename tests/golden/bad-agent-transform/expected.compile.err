@@ -1,0 +1,2 @@
+//third_party/widget:widget: agent label `//tools/agent:ghost` does not resolve to a agent rule
+//third_party/widget:widget: prompt_template label `//tools/agent/prompts:missing` does not resolve to a prompt_template rule

@@ -582,6 +582,8 @@ fn apply_structural_tree_transforms(
             } => apply_replace(repo, tree, before, after, paths, *regex)?,
             // Message-only transforms do not touch the tree.
             Transform::RewriteMessage { .. } => tree,
+            // Tip-phase transforms are applied in the tip layer, not here.
+            Transform::ApplyPatch { .. } | Transform::AgentTransform { .. } => tree,
         };
     }
     Ok(tree)

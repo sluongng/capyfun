@@ -1,0 +1,30 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "github_import",
+      "name": "widget",
+      "repo": "acme/widget",
+      "ref": "refs/heads/main",
+      "into": null,
+      "patches": [],
+      "transforms": [
+        {
+          "transform": "agent_transform",
+          "agent": "//tools/agent:ghost",
+          "prompt": {
+            "template": "//tools/agent/prompts:missing",
+            "vars": []
+          },
+          "paths": []
+        }
+      ],
+      "package": "//third_party/widget"
+    }
+  ]
+}

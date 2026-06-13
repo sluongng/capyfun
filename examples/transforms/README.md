@@ -1,11 +1,19 @@
-# Example: transformations + generative agents (syntax preview)
+# Example: transformations + generative agents
 
-> **Mostly forward-looking.** The transform and agent builtins (`replace`,
-> `harness`, `model`, `agent`, `agent_transform`, …) land in the milestones in
-> `../../docs/design/transformations.md` (T1–T5), so this tree is not evaluable
-> by `capyfun check` as a whole yet. The **`git_repository`** rule used in
-> `tools/plugins` and `tools/skills` *is* implemented — see `../monorepo` for the
-> fully-evaluable config model and `capyfun vendor` for git_repository in action.
+> **Evaluable today.** The transform and agent builtins (`replace`, `move`,
+> `copy`, `rewrite_message`, `apply_patch`, `agent_transform`/`template`, and the
+> `harness`/`model`/`agent`/`prompt_template` rules) are implemented (T1–T4), so
+> the whole tree compiles and statically validates:
+>
+> ```sh
+> capyfun check --root examples/transforms
+> ```
+>
+> Structural transforms (`replace`/`move`/`copy`/`rewrite_message`) also apply
+> per commit during `capyfun import`. The one remaining milestone is generative
+> **execution** (T5): actually running an `agent_transform` and materializing its
+> output to a content-addressed patch. See
+> `../../docs/design/transformations.md`.
 
 ## Layout
 

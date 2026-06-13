@@ -1,0 +1,12 @@
+# agent_transform referencing an agent and a prompt_template that do not exist:
+# both label references must fail to resolve at compile time.
+github_import(
+    name = "widget",
+    repo = "acme/widget",
+    transforms = [
+        agent_transform(
+            agent = "//tools/agent:ghost",
+            prompt = template("//tools/agent/prompts:missing"),
+        ),
+    ],
+)

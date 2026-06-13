@@ -62,6 +62,22 @@ pub enum Transform {
         /// Whole trailer lines to append (e.g. `Reviewed-by: ...`).
         add_trailers: Vec<String>,
     },
+    /// Apply a static unified-diff patch file once on top of the mirror tip.
+    /// `file` is monorepo-root-relative (resolved against the SRC package).
+    ApplyPatch { file: String },
+    /// Run a coding agent over the imported subtree and capture its edits as a
+    /// patch, committed once on top of the mirror tip. `agent` and
+    /// `prompt_template` are resolved Bazel-style labels.
+    AgentTransform {
+        /// Resolved label of the `agent` rule to run.
+        agent: String,
+        /// Resolved label of the bound `prompt_template` rule.
+        prompt_template: String,
+        /// Call-site template vars, normalized `(key, value)` pairs.
+        vars: Vec<(String, String)>,
+        /// Optional subtree-relative globs scoping the agent's view; empty = all.
+        paths: Vec<String>,
+    },
 }
 
 impl Transform {
@@ -72,6 +88,7 @@ impl Transform {
             | Transform::Move { .. }
             | Transform::Copy { .. }
             | Transform::RewriteMessage { .. } => Phase::Mirror,
+            Transform::ApplyPatch { .. } | Transform::AgentTransform { .. } => Phase::Tip,
         }
     }
 
@@ -82,6 +99,8 @@ impl Transform {
             Transform::Move { .. } => "move",
             Transform::Copy { .. } => "copy",
             Transform::RewriteMessage { .. } => "rewrite_message",
+            Transform::ApplyPatch { .. } => "apply_patch",
+            Transform::AgentTransform { .. } => "agent_transform",
         }
     }
 }

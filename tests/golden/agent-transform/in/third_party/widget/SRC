@@ -1,0 +1,18 @@
+# A tip-phase pipeline: a structural rewrite, then an apply_patch and a
+# generative agent_transform applied as a rebased layer on top of the mirror.
+github_import(
+    name = "widget",
+    repo = "acme/widget",
+    transforms = [
+        move(src = "pkg", dst = "lib"),
+        apply_patch("patches/0001-pin-toolchain.patch"),
+        agent_transform(
+            agent = "//tools/agent:porter",
+            prompt = template(
+                "//tools/agent/prompts:port",
+                vars = {"style": "//docs:STYLE.md"},
+            ),
+            paths = ["lib/**"],
+        ),
+    ],
+)

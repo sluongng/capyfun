@@ -249,7 +249,7 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                         join_dir(dir, Some(p))
                     })
                     .collect();
-                let transforms = lower_transforms(&label, &d.transforms, &mut errors);
+                let transforms = lower_transforms(&label, dir, &d.transforms, &mut errors);
                 imports.push(Import {
                     label,
                     name: d.name.clone(),
@@ -395,6 +395,46 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
         });
     }
 
+    // --- third pass: resolve agent_transform label references ---
+    // `agent_transform`s carry `agent` / `prompt_template` labels that can only
+    // be checked once agents and prompt templates exist.
+    for import in &imports {
+        for t in &import.transforms {
+            if let Transform::AgentTransform {
+                agent,
+                prompt_template,
+                vars,
+                ..
+            } = t
+            {
+                resolve_label(
+                    &import.label,
+                    "agent",
+                    agent,
+                    agents.iter().map(|a| a.label.as_str()),
+                    &mut errors,
+                );
+                resolve_label(
+                    &import.label,
+                    "prompt_template",
+                    prompt_template,
+                    prompt_templates.iter().map(|p| p.label.as_str()),
+                    &mut errors,
+                );
+                // Var *values* that look like `//`-anchored labels are shape-
+                // checked only (purity: no filesystem/target lookup here).
+                for (k, v) in vars {
+                    if v.starts_with("//") && !is_label_shaped(v) {
+                        errors.push(format!(
+                            "{}: agent_transform var `{k}` value `{v}` is not a valid label",
+                            import.label
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // --- cross-rule checks ---
     // Names are unique per package across all rule kinds; destinations (imports
     // and vendors both write into the tree) must not overlap.
@@ -481,6 +521,27 @@ fn resolve_label<'a>(
     None
 }
 
+/// Whether `s` has the shape of a Bazel-style label `//pkg/path:name` (used to
+/// shape-check `agent_transform` var values that reference a target/file). This
+/// validates form only — it does not check the target exists.
+fn is_label_shaped(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("//") else {
+        return false;
+    };
+    match rest.split_once(':') {
+        Some((pkg, name)) => {
+            !name.is_empty()
+                && !name.contains('/')
+                && !s.chars().any(char::is_whitespace)
+                && (pkg.is_empty()
+                    || pkg
+                        .split('/')
+                        .all(|seg| !seg.is_empty() && seg != "." && seg != ".."))
+        }
+        None => false,
+    }
+}
+
 /// Names must be unique per package across all rule kinds. `entries` are
 /// `(package, name, label)`.
 fn check_unique_names(entries: &[(&str, &str, &str)], errors: &mut Vec<String>) {
@@ -506,12 +567,13 @@ fn check_unique_names(entries: &[(&str, &str, &str)], errors: &mut Vec<String>) 
 /// "mirror runs before tip" contract. `label` prefixes diagnostics.
 fn lower_transforms(
     label: &str,
+    dir: &str,
     specs: &[TransformSpec],
     errors: &mut Vec<String>,
 ) -> Vec<Transform> {
     let mut transforms: Vec<Transform> = specs
         .iter()
-        .map(|spec| lower_transform(label, spec, errors))
+        .map(|spec| lower_transform(label, dir, spec, errors))
         .collect();
     // Stable partition: mirror-phase entries keep their relative order, then tip.
     transforms.sort_by_key(|t| match t.phase() {
@@ -521,8 +583,16 @@ fn lower_transforms(
     transforms
 }
 
-/// Lower and validate one transform spec into an IR transform.
-fn lower_transform(label: &str, spec: &TransformSpec, errors: &mut Vec<String>) -> Transform {
+/// Lower and validate one transform spec into an IR transform. `dir` is the
+/// declaring package's monorepo-root-relative directory, used to anchor the
+/// `apply_patch` file path (the only package-relative path in a transform; all
+/// other transform paths are subtree-relative).
+fn lower_transform(
+    label: &str,
+    dir: &str,
+    spec: &TransformSpec,
+    errors: &mut Vec<String>,
+) -> Transform {
     match spec {
         TransformSpec::Replace {
             before,
@@ -577,6 +647,31 @@ fn lower_transform(label: &str, spec: &TransformSpec, errors: &mut Vec<String>) 
                 regex: *regex,
                 strip_trailers: strip_trailers.clone(),
                 add_trailers: add_trailers.clone(),
+            }
+        }
+        TransformSpec::ApplyPatch { file } => {
+            validate::check_rel_path(label, "apply_patch file", file, errors);
+            Transform::ApplyPatch {
+                file: join_dir(dir, Some(file)),
+            }
+        }
+        TransformSpec::AgentTransform {
+            agent,
+            prompt,
+            paths,
+        } => {
+            for p in paths {
+                validate::check_glob_path(label, "agent_transform paths", p, errors);
+            }
+            // `agent`/`prompt.template` are cross-rule label references resolved
+            // in a post-pass (`resolve_transform_labels`) once agents and prompt
+            // templates are lowered. Var *values* that look like labels are
+            // shape-checked there too; file existence is execution-time.
+            Transform::AgentTransform {
+                agent: agent.clone(),
+                prompt_template: prompt.template.clone(),
+                vars: prompt.vars.clone(),
+                paths: paths.clone(),
             }
         }
     }
