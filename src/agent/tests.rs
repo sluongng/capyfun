@@ -65,6 +65,28 @@ fn resolve_credential_resolved_when_var_set() {
 }
 
 #[test]
+fn harness_provider_matrix() {
+    assert!(HarnessKind::ClaudeCode.can_drive("anthropic"));
+    assert!(!HarnessKind::ClaudeCode.can_drive("openai"));
+    assert!(HarnessKind::Antigravity.can_drive("google"));
+    assert!(!HarnessKind::Antigravity.can_drive("anthropic"));
+    assert!(HarnessKind::Codex.can_drive("openai"));
+    assert!(HarnessKind::Codex.can_drive("nebius"));
+    assert!(!HarnessKind::Codex.can_drive("anthropic"));
+    assert!(HarnessKind::Pi.can_drive("openai"));
+    assert!(HarnessKind::Pi.can_drive("nebius"));
+    assert!(!HarnessKind::Pi.can_drive("google"));
+}
+
+#[test]
+fn known_providers_are_recognized() {
+    for p in KNOWN_PROVIDERS {
+        assert!(is_known_provider(p), "{p}");
+    }
+    assert!(!is_known_provider("cohere"));
+}
+
+#[test]
 fn cli_harnesses_support_ambient_login() {
     assert!(HarnessKind::ClaudeCode.supports_ambient_login());
     assert!(HarnessKind::Codex.supports_ambient_login());

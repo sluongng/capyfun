@@ -1,0 +1,33 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "agent",
+      "name": "mismatch",
+      "harness": "//tools/harness:claude_code",
+      "model": "//tools/models:gpt",
+      "package": "//tools/agent"
+    },
+    {
+      "kind": "harness",
+      "name": "claude_code",
+      "kind": "claude_code",
+      "plugins": [],
+      "skills": [],
+      "package": "//tools/harness"
+    },
+    {
+      "kind": "model",
+      "name": "gpt",
+      "provider": "openai",
+      "id": "gpt-5.5",
+      "credential": null,
+      "package": "//tools/models"
+    }
+  ]
+}

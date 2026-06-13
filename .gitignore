@@ -6,3 +6,6 @@ Cargo.lock.orig
 secrets.env
 .env
 .env.local
+
+# Claude Code worktrees/session state
+.claude/

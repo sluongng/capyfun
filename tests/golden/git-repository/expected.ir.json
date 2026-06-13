@@ -14,5 +14,9 @@
       "dest": "third_party/cc-plugin"
     }
   ],
-  "exports": []
+  "exports": [],
+  "harnesses": [],
+  "models": [],
+  "agents": [],
+  "prompt_templates": []
 }

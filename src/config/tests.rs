@@ -119,6 +119,101 @@ fn explicit_into_and_export_are_captured() {
 }
 
 #[test]
+fn captures_agent_tool_rules() {
+    let (_dir, root) = write_tree(&[
+        ("SRC", "monorepo(name = \"m\", default_branch = \"main\")\n"),
+        (
+            "tools/harness/SRC",
+            "harness(name = \"cc\", kind = \"claude_code\", \
+             plugins = [\"//tools/plugins:bazel\"], skills = [\"//tools/skills:review\"])\n",
+        ),
+        (
+            "tools/models/SRC",
+            "model(name = \"opus\", provider = \"anthropic\", id = \"claude-opus-4-8\")\n\
+             model(name = \"gpt\", provider = \"openai\", id = \"gpt-5.5\", credential = \"env:OPENAI_API_KEY\")\n",
+        ),
+        (
+            "tools/agent/SRC",
+            "agent(name = \"reviewer\", harness = \"//tools/harness:cc\", model = \"//tools/models:opus\")\n",
+        ),
+        (
+            "tools/agent/prompts/SRC",
+            "prompt_template(name = \"review\", src = \"review.tmpl\")\n",
+        ),
+    ]);
+    let cfg = evaluate(&root).unwrap();
+
+    let harnesses: Vec<_> = cfg
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Harness(h) => Some(h),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(harnesses.len(), 1);
+    assert_eq!(harnesses[0].name, "cc");
+    assert_eq!(harnesses[0].kind, "claude_code");
+    assert_eq!(harnesses[0].plugins, vec!["//tools/plugins:bazel"]);
+    assert_eq!(harnesses[0].skills, vec!["//tools/skills:review"]);
+    assert_eq!(harnesses[0].package, "//tools/harness");
+
+    let models: Vec<_> = cfg
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Model(m) => Some(m),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].provider, "anthropic");
+    assert_eq!(models[0].credential, None);
+    assert_eq!(models[1].credential.as_deref(), Some("env:OPENAI_API_KEY"));
+
+    let agents: Vec<_> = cfg
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Agent(a) => Some(a),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].harness, "//tools/harness:cc");
+    assert_eq!(agents[0].model, "//tools/models:opus");
+
+    let templates: Vec<_> = cfg
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::PromptTemplate(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].src, "review.tmpl");
+    assert_eq!(templates[0].package, "//tools/agent/prompts");
+}
+
+#[test]
+fn agent_rule_in_library_errors() {
+    let (_dir, root) = write_tree(&[
+        ("SRC", "load(\"//lib/bad.scl\", \"x\")\nx()\n"),
+        (
+            "lib/bad.scl",
+            "harness(name = \"oops\", kind = \"claude_code\")\ndef x():\n    pass\n",
+        ),
+    ]);
+    let err = evaluate(&root).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cannot be instantiated in a .scl library"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
 fn top_level_builtin_in_library_errors() {
     let (_dir, root) = write_tree(&[
         ("SRC", "load(\"//lib/bad.scl\", \"x\")\nx()\n"),

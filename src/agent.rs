@@ -57,6 +57,29 @@ impl HarnessKind {
     pub fn supports_ambient_login(&self) -> bool {
         matches!(self, Self::ClaudeCode | Self::Codex | Self::Antigravity)
     }
+
+    /// Whether this harness can drive a model from `provider`. Encodes the
+    /// harness→provider matrix from `docs/design/transformations.md`:
+    /// `claude_code`→anthropic; `antigravity`→google; `codex`→openai (and other
+    /// open models); `pi`→openai/nebius (and other open models). An `agent`
+    /// whose harness cannot drive its model is a validation error.
+    pub fn can_drive(&self, provider: &str) -> bool {
+        match self {
+            Self::ClaudeCode => provider == "anthropic",
+            Self::Antigravity => provider == "google",
+            Self::Codex => matches!(provider, "openai" | "nebius"),
+            Self::Pi => matches!(provider, "openai" | "nebius"),
+        }
+    }
+}
+
+/// The model providers CapyFun recognizes (matches the `model(provider=...)`
+/// config field). Membership is the validation source of truth.
+pub const KNOWN_PROVIDERS: [&str; 4] = ["anthropic", "openai", "google", "nebius"];
+
+/// Whether `provider` is one CapyFun recognizes.
+pub fn is_known_provider(provider: &str) -> bool {
+    KNOWN_PROVIDERS.contains(&provider)
 }
 
 /// The conventional environment variable a provider's key is read from when a

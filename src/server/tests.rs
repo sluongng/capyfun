@@ -26,6 +26,10 @@ fn test_ir() -> Ir {
             dest: "third_party/rust/anyhow".into(),
         }],
         exports: vec![],
+        harnesses: vec![],
+        models: vec![],
+        agents: vec![],
+        prompt_templates: vec![],
     }
 }
 
