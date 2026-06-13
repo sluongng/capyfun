@@ -13,5 +13,6 @@
 
 pub mod config;
 pub mod engine;
+pub mod gomod;
 pub mod ir;
 pub mod validate;
