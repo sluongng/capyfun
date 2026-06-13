@@ -18,10 +18,12 @@ first slice (the poll reconciler) is spec'd concretely at the end.
 > that parses GitHub push payloads into the same trigger model — and a matched
 > [`Trigger`] now drives an idempotent reconcile of the affected target(s) (the
 > `ReconcileActor`, ref-writes serialized so the poll loop and webhook handler do
-> not race). Remaining next steps: webhook **HMAC verification**, **pin-bump PRs**
-> (proposing a new upstream pin on a release, vs. reconciling to the declared
-> pin), and per-target output refs (`refs/capyfun/<label>` + a monorepo PR) so
-> reconciles do not write the default branch directly.
+> not race). Remaining next steps, each with its own design doc: per-target
+> output refs + a monorepo PR ([`per-target-refs.md`](per-target-refs.md)) so
+> reconciles do not write the default branch directly; **pin-bump PRs**
+> ([`pin-bump.md`](pin-bump.md)) — proposing a new upstream pin on a release, vs.
+> reconciling to the declared pin; and webhook **HMAC verification** + event
+> hygiene ([`webhook-security.md`](webhook-security.md)).
 
 ## Thesis: level-triggered, events are hints
 
