@@ -4,6 +4,13 @@ This roadmap drives the first phase of CapyFun: a working **import** round-trip
 that replays an external repository's commits into a TinyTree monorepo path,
 incrementally and deterministically. Export is deferred until import is solid.
 
+> **Status:** M0–M7 complete. The import round-trip works end to end —
+> `capyfun import //pkg:name --root <mono>` fetches an origin, mirrors its
+> first-parent history into the package, applies the patch layer, and updates
+> the branch; idempotent and incremental. Verified by `cargo test` and
+> `scripts/smoke-import.sh`. Next: export (M8) and the transform system (T1–T5,
+> see `../design/transformations.md`).
+
 Read `../../CLAUDE.md` first for the project thesis. Keep each milestone small,
 runnable, and tested. Run `cargo test` and `cargo clippy` before finishing one.
 
