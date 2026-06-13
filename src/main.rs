@@ -17,6 +17,8 @@ struct Cli {
 enum Command {
     /// Discover and evaluate SRC files, listing the captured rules.
     Config(ConfigArgs),
+    /// Evaluate, lower to IR, and statically validate; print the IR as JSON.
+    Check(ConfigArgs),
     /// Replay an external repository's commits into a monorepo path.
     Import(ImportArgs),
     /// Publish a monorepo path to a destination remote as a GitHub PR.
@@ -52,8 +54,22 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Config(args) => run_config(args),
+        Command::Check(args) => run_check(args),
         Command::Import(args) => run_import(args),
         Command::Export(args) => run_export(args),
+    }
+}
+
+fn run_check(args: ConfigArgs) -> Result<()> {
+    let raw = capyfun::config::evaluate(&args.root)?;
+    match capyfun::ir::compile(&raw) {
+        Ok(ir) => {
+            println!("{}", serde_json::to_string_pretty(&ir)?);
+            Ok(())
+        }
+        Err(diags) => {
+            bail!("config is invalid:\n  {}", diags.join("\n  "));
+        }
     }
 }
 

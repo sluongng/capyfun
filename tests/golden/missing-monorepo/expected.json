@@ -1,0 +1,13 @@
+{
+  "decls": [
+    {
+      "kind": "github_import",
+      "name": "svc",
+      "repo": "acme/svc",
+      "ref": "refs/heads/main",
+      "into": null,
+      "patches": [],
+      "package": "//svc"
+    }
+  ]
+}

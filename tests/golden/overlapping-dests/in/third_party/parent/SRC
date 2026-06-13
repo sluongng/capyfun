@@ -1,0 +1,1 @@
+github_import(name = "parent", repo = "acme/parent")

@@ -1,0 +1,21 @@
+{
+  "monorepo": {
+    "name": "acme",
+    "default_branch": "main"
+  },
+  "imports": [
+    {
+      "label": "//third_party/widget:widget",
+      "name": "widget",
+      "package": "//third_party/widget",
+      "repo": "acme/widget",
+      "ref": "refs/heads/release",
+      "dest": "third_party/widget/vendor",
+      "patches": [
+        "third_party/widget/patches/0001-a.patch",
+        "third_party/widget/patches/0002-b.patch"
+      ]
+    }
+  ],
+  "exports": []
+}

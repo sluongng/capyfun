@@ -1,0 +1,1 @@
+github_import(name = "svc", repo = "not-a-valid-slug")

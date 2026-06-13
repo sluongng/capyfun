@@ -1,0 +1,16 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "a",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "monorepo",
+      "name": "b",
+      "default_branch": "main",
+      "package": "//sub"
+    }
+  ]
+}

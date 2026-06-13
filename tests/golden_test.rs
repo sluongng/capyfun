@@ -3,13 +3,17 @@
 //! Each case is a directory `tests/golden/<case>/` containing:
 //!
 //! - `in/` — a monorepo tree (SRC files and `.star` libraries) to evaluate.
-//! - exactly one golden, written by the harness:
-//!   - `expected.json` — captured config as JSON (the evaluation succeeded), or
-//!   - `expected.err`  — the error chain text (the evaluation failed).
+//! - **eval-stage** golden (always one):
+//!   - `expected.json` — captured config as JSON (evaluation succeeded), or
+//!   - `expected.err`  — the error chain text (evaluation failed).
+//! - **compile-stage** golden (only when evaluation succeeded — lowering to IR
+//!   plus static validation):
+//!   - `expected.ir.json`     — the validated IR (compilation succeeded), or
+//!   - `expected.compile.err` — the sorted diagnostics (validation failed).
 //!
-//! The harness runs [`capyfun::config::evaluate`] on each `in/` tree and diffs
-//! the result against the golden. To (re)generate goldens after an intentional
-//! change:
+//! The harness runs [`capyfun::config::evaluate`] then [`capyfun::ir::compile`]
+//! on each `in/` tree and diffs against the goldens. To (re)generate goldens
+//! after an intentional change:
 //!
 //! ```sh
 //! UPDATE_GOLDEN=1 cargo test --test golden_test
@@ -18,7 +22,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use capyfun::config;
+use capyfun::{config, ir};
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
@@ -33,6 +37,45 @@ fn discover_cases() -> Vec<PathBuf> {
         .collect();
     cases.sort();
     cases
+}
+
+/// Diff one stage's outcome (Ok text vs Err text) against its pair of goldens,
+/// enforcing that the right golden is present.
+fn stage(
+    name: &str,
+    stage: &str,
+    ok_golden: &Path,
+    err_golden: &Path,
+    outcome: Result<String, String>,
+    update: bool,
+    failures: &mut Vec<String>,
+) {
+    match outcome {
+        Ok(actual) => {
+            if update && err_golden.exists() {
+                fs::remove_file(err_golden).unwrap();
+            }
+            if !update && err_golden.exists() {
+                failures.push(format!(
+                    "case `{name}` [{stage}]: expected failure but it succeeded with:\n{actual}"
+                ));
+                return;
+            }
+            check(ok_golden, &actual, update, failures);
+        }
+        Err(actual) => {
+            if update && ok_golden.exists() {
+                fs::remove_file(ok_golden).unwrap();
+            }
+            if !update && ok_golden.exists() {
+                failures.push(format!(
+                    "case `{name}` [{stage}]: expected success but it failed with:\n{actual}"
+                ));
+                return;
+            }
+            check(err_golden, &actual, update, failures);
+        }
+    }
 }
 
 /// Compare `actual` against the golden at `path`, or rewrite it under update
@@ -65,38 +108,37 @@ fn golden_config() {
         let in_dir = case.join("in");
         assert!(in_dir.is_dir(), "case `{name}` has no in/ directory");
 
-        let json_golden = case.join("expected.json");
-        let err_golden = case.join("expected.err");
+        // Stage 1: evaluate SRC files into captured config.
+        let eval = config::evaluate(&in_dir);
+        let eval_outcome = match &eval {
+            Ok(cfg) => Ok(serde_json::to_string_pretty(cfg).unwrap() + "\n"),
+            Err(e) => Err(format!("{e:#}\n")),
+        };
+        stage(
+            &name,
+            "eval",
+            &case.join("expected.json"),
+            &case.join("expected.err"),
+            eval_outcome,
+            update,
+            &mut failures,
+        );
 
-        match config::evaluate(&in_dir) {
-            Ok(cfg) => {
-                let actual = serde_json::to_string_pretty(&cfg).unwrap() + "\n";
-                if update && err_golden.exists() {
-                    fs::remove_file(&err_golden).unwrap();
-                }
-                if !update && err_golden.exists() {
-                    failures.push(format!(
-                        "case `{name}`: expected an error (expected.err present) but \
-                         evaluation succeeded with:\n{actual}"
-                    ));
-                    continue;
-                }
-                check(&json_golden, &actual, update, &mut failures);
-            }
-            Err(e) => {
-                let actual = format!("{e:#}\n");
-                if update && json_golden.exists() {
-                    fs::remove_file(&json_golden).unwrap();
-                }
-                if !update && json_golden.exists() {
-                    failures.push(format!(
-                        "case `{name}`: expected success (expected.json present) but \
-                         evaluation errored with:\n{actual}"
-                    ));
-                    continue;
-                }
-                check(&err_golden, &actual, update, &mut failures);
-            }
+        // Stage 2: lower to IR + validate (only when evaluation succeeded).
+        if let Ok(cfg) = &eval {
+            let compile_outcome = match ir::compile(cfg) {
+                Ok(ir) => Ok(serde_json::to_string_pretty(&ir).unwrap() + "\n"),
+                Err(diags) => Err(diags.join("\n") + "\n"),
+            };
+            stage(
+                &name,
+                "compile",
+                &case.join("expected.ir.json"),
+                &case.join("expected.compile.err"),
+                compile_outcome,
+                update,
+                &mut failures,
+            );
         }
     }
 
