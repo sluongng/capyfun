@@ -1,0 +1,12 @@
+# Package //sdk/go: a monorepo-native SDK published *out* to a standalone repo.
+#
+# The import/vendor rules above bring third-party code *in*; this is the other
+# direction — `capyfun export` ships sdk/go/client/** to github.com/acme/sdk-go
+# as a PR, with the `client/` prefix stripped so the SDK sits at the dest root.
+
+github_export(
+    name = "go-sdk",
+    repo = "acme/sdk-go",
+    branch = "main",
+    from_path = "client",
+)

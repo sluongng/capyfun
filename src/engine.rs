@@ -427,6 +427,179 @@ pub fn vendor_snapshot(
     })
 }
 
+// --- M8: export (publish a monorepo path out as a GitHub PR) ---
+
+/// Commit-message trailer recording the monorepo commit a destination commit
+/// reflects. This is the export side of the commit map — the inverse of
+/// [`ORIGIN_TRAILER`]: it lets a re-export know what has already shipped, so
+/// export is incremental and idempotent the same way import is.
+pub const EXPORT_TRAILER: &str = "CapyFun-Export";
+
+/// Restore `ORIG_SRC` files (at any depth) back to `SRC`, the inverse of
+/// [`rename_src_markers`]. Used on the export path so a subtree that once carried
+/// an upstream `SRC` (renamed to `ORIG_SRC` on import) ships back out with its
+/// own `SRC` intact. Deterministic: a tree with no `ORIG_SRC` rewrites to an
+/// identical OID.
+fn restore_src_markers(repo: &Repository, tree_oid: Oid) -> Result<Oid> {
+    let tree = repo.find_tree(tree_oid)?;
+    let mut builder = repo.treebuilder(None)?;
+    for entry in tree.iter() {
+        let name = entry.name().context("non-UTF-8 tree entry name")?;
+        let mode = entry.filemode();
+        if entry.kind() == Some(git2::ObjectType::Tree) {
+            let rewritten = restore_src_markers(repo, entry.id())?;
+            builder.insert(name, rewritten, mode)?;
+        } else if name == RENAMED_SRC_FILE {
+            builder.insert(SRC_FILE, entry.id(), mode)?;
+        } else {
+            builder.insert(name, entry.id(), mode)?;
+        }
+    }
+    Ok(builder.write()?)
+}
+
+/// Strip CapyFun metadata from an exported subtree so the destination sees only
+/// shippable content — the inverse of import's metadata handling. CapyFun's own
+/// package marker (`SRC`) and `patches/` directory at the export root are dropped
+/// (they are config, not destination source), then any `ORIG_SRC` is restored to
+/// `SRC` (see [`restore_src_markers`]). Order matters: the CapyFun `SRC` is
+/// removed first, then a buried upstream `SRC` (held as `ORIG_SRC`) is restored
+/// into its place.
+fn strip_capyfun_metadata_for_export(repo: &Repository, subtree: Oid) -> Result<Oid> {
+    let tree = repo.find_tree(subtree)?;
+    let mut builder = repo.treebuilder(Some(&tree))?;
+    for name in RESERVED_DEST_ENTRIES {
+        if builder.get(name)?.is_some() {
+            builder.remove(name)?;
+        }
+    }
+    let stripped = builder.write()?;
+    restore_src_markers(repo, stripped)
+}
+
+/// Append the [`EXPORT_TRAILER`] (recording the monorepo commit) to a message.
+fn with_export_trailer(message: &str, mono: Oid) -> String {
+    let body = message.trim_end();
+    let trailer = format!("{EXPORT_TRAILER}: {mono}\n");
+    if body.is_empty() {
+        trailer
+    } else {
+        format!("{body}\n\n{trailer}")
+    }
+}
+
+/// The last monorepo commit reflected on the destination, from the most recent
+/// [`EXPORT_TRAILER`] along `dest_tip`'s first-parent chain. Each destination
+/// repository is dedicated to one export (the prefix is stripped), so no further
+/// scoping is needed. Returns `None` when nothing has shipped yet.
+fn last_exported(repo: &Repository, dest_tip: Option<Oid>) -> Result<Option<Oid>> {
+    let mut cur = dest_tip;
+    while let Some(c) = cur {
+        let commit = repo.find_commit(c)?;
+        if let Some(sha) = trailer_value(commit.message().unwrap_or(""), EXPORT_TRAILER) {
+            let oid = Oid::from_str(&sha)
+                .with_context(|| format!("commit {c} has malformed {EXPORT_TRAILER}: {sha}"))?;
+            return Ok(Some(oid));
+        }
+        cur = commit.parent_ids().next();
+    }
+    Ok(None)
+}
+
+/// Outcome of an export run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportOutcome {
+    /// Destination commits created this run (commits whose `from` content was
+    /// unchanged are skipped, so this counts only real changes to the path).
+    pub exported: usize,
+    /// The resulting export-branch tip (unchanged from `dest_tip` when nothing
+    /// new shipped). The caller pushes this to the destination and opens a PR.
+    pub head: Option<Oid>,
+}
+
+/// Project the monorepo's first-parent history for `from` onto the destination —
+/// the inverse of [`import_mirror`].
+///
+/// Every monorepo commit newer than the last-exported one (read from `dest_tip`'s
+/// trailers) is replayed onto `dest_tip` with the `from` prefix stripped and
+/// CapyFun metadata removed ([`strip_capyfun_metadata_for_export`]),
+/// author/committer/message preserved, and an [`EXPORT_TRAILER`] appended.
+/// Commits that do not change the exported content are skipped, so the result is
+/// a clean changeset for one PR. Re-running with nothing new is a no-op. Returns
+/// the new branch tip; the caller pushes it and opens the PR.
+pub fn export(
+    repo: &Repository,
+    from: &str,
+    mono_tip: Oid,
+    dest_tip: Option<Oid>,
+) -> Result<ExportOutcome> {
+    let last = last_exported(repo, dest_tip)?;
+    if Some(mono_tip) == last {
+        return Ok(ExportOutcome {
+            exported: 0,
+            head: dest_tip,
+        });
+    }
+    let to_export = first_parent_delta(repo, mono_tip, last)?;
+
+    let mut head = dest_tip;
+    let mut prev_tree = match dest_tip {
+        Some(t) => Some(repo.find_commit(t)?.tree()?.id()),
+        None => None,
+    };
+    let mut exported = 0;
+    for mono in &to_export {
+        let mono_commit = repo.find_commit(*mono)?;
+        let Some(sub) = subtree_oid(repo, mono_commit.tree()?.id(), from)? else {
+            // `from` does not exist at this commit (created later): nothing to ship.
+            continue;
+        };
+        let shipped = strip_capyfun_metadata_for_export(repo, sub)?;
+        if Some(shipped) == prev_tree {
+            // This monorepo commit left the exported content untouched: skip it,
+            // so the PR holds only commits that change the destination.
+            continue;
+        }
+        let tree = repo.find_tree(shipped)?;
+        let message = with_export_trailer(mono_commit.message().unwrap_or(""), *mono);
+        let parent_commit: Option<Commit> = match head {
+            Some(h) => Some(repo.find_commit(h)?),
+            None => None,
+        };
+        let parents: Vec<&Commit> = parent_commit.iter().collect();
+        head = Some(repo.commit(
+            None,
+            &mono_commit.author(),
+            &mono_commit.committer(),
+            &message,
+            &tree,
+            &parents,
+        )?);
+        prev_tree = Some(shipped);
+        exported += 1;
+    }
+    Ok(ExportOutcome { exported, head })
+}
+
+/// Push `head` to `branch` on the remote at `url`, creating/overwriting that
+/// branch. The commit is published through a throwaway local ref (libgit2 push
+/// needs a local ref as the refspec source); the ref is removed afterward.
+pub fn push_branch(repo: &Repository, url: &str, head: Oid, branch: &str) -> Result<()> {
+    let local_ref = "refs/capyfun/export_push_head";
+    repo.reference(local_ref, head, true, "capyfun export push")?;
+    let mut remote = repo
+        .remote_anonymous(url)
+        .with_context(|| format!("opening remote {url}"))?;
+    let refspec = format!("+{local_ref}:refs/heads/{branch}");
+    let result = remote
+        .push(&[&refspec], None)
+        .with_context(|| format!("pushing {branch} to {url}"));
+    if let Ok(mut r) = repo.find_reference(local_ref) {
+        r.delete().ok();
+    }
+    result
+}
+
 // --- M6: patch layer (tip, rebased on the mirror tip) ---
 
 /// A patch to apply in the tip layer: a label (its repo-relative path, recorded

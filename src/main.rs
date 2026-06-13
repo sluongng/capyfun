@@ -132,6 +132,10 @@ struct ExportArgs {
     /// Monorepo root (the directory holding the root `SRC` file).
     #[arg(long, default_value = ".")]
     root: PathBuf,
+    /// Push the export branch but do not open a GitHub PR (print the `gh`
+    /// command instead). Implied when the destination is a local repository.
+    #[arg(long)]
+    no_pr: bool,
 }
 
 fn main() -> Result<()> {
@@ -764,9 +768,112 @@ fn resolve_agent_invocation(
 }
 
 fn run_export(args: ExportArgs) -> Result<()> {
-    bail!(
-        "export '{}' (root {}) is not implemented yet (deferred, see docs/plans/import-roadmap.md, M8)",
-        args.label,
-        args.root.display()
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+
+    let export = ir
+        .exports
+        .iter()
+        .find(|e| e.label == args.label)
+        .ok_or_else(|| {
+            let labels: Vec<&str> = ir.exports.iter().map(|e| e.label.as_str()).collect();
+            anyhow::anyhow!(
+                "no github_export labeled `{}` (available: {})",
+                args.label,
+                if labels.is_empty() {
+                    "none".into()
+                } else {
+                    labels.join(", ")
+                }
+            )
+        })?;
+
+    let repo = git2::Repository::open(&args.root)
+        .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
+
+    // Current tip of the monorepo branch we export from.
+    let mono_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
+    let mono_tip = repo
+        .find_reference(&mono_ref)
+        .ok()
+        .and_then(|r| r.target())
+        .with_context(|| format!("monorepo branch {mono_ref} has no commits to export"))?;
+
+    // Fetch the destination branch into the object store: it is the commit-map
+    // source of truth for what has already shipped. A destination with no such
+    // branch yet (a fresh repo) means nothing has shipped.
+    let url = origin_url(&export.repo);
+    let dest_tip =
+        capyfun::engine::fetch_commit(&repo, &url, &format!("refs/heads/{}", export.branch)).ok();
+
+    let outcome = capyfun::engine::export(&repo, &export.from, mono_tip, dest_tip)?;
+
+    match outcome.head {
+        Some(head) if Some(head) != dest_tip => {
+            let export_branch = format!("capyfun/export-{}", export.name);
+            capyfun::engine::push_branch(&repo, &url, head, &export_branch)?;
+            println!(
+                "exported {} commit(s) for {} from {}; pushed branch {} to {}",
+                outcome.exported, export.label, export.from, export_branch, export.repo
+            );
+            open_pr(export, &export_branch, args.no_pr)?;
+        }
+        _ => println!("{} is already up to date on {}", export.label, export.repo),
+    }
+    Ok(())
+}
+
+/// Open a GitHub PR for a pushed export branch, or explain why it was skipped.
+///
+/// PR creation shells out to the GitHub CLI (`gh`). It is skipped — printing the
+/// equivalent command instead — when `--no-pr` is set or the destination is a
+/// local repository (`CAPYFUN_GITHUB_BASE`), so hermetic demos/tests exercise the
+/// full branch push without needing network access or a real forge.
+fn open_pr(export: &capyfun::ir::Export, branch: &str, no_pr: bool) -> Result<()> {
+    let title = format!("Export {} from the monorepo", export.name);
+    let body = format!(
+        "Automated export by CapyFun from `{}`.\n\n\
+         Each commit carries a `CapyFun-Export` trailer mapping it back to the \
+         monorepo commit it reflects.",
+        export.from
     );
+
+    let local_dest = std::env::var("CAPYFUN_GITHUB_BASE").is_ok();
+    if no_pr || local_dest {
+        let why = if no_pr {
+            "--no-pr"
+        } else {
+            "local destination (CAPYFUN_GITHUB_BASE)"
+        };
+        println!("skipping PR ({why}); to open it yourself, run:");
+        println!(
+            "  gh pr create --repo {} --base {} --head {} --title {:?}",
+            export.repo, export.branch, branch, title
+        );
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            &export.repo,
+            "--base",
+            &export.branch,
+            "--head",
+            branch,
+            "--title",
+            &title,
+            "--body",
+            &body,
+        ])
+        .status()
+        .context("running `gh pr create` (is the GitHub CLI installed and authenticated?)")?;
+    if !status.success() {
+        bail!("`gh pr create` failed");
+    }
+    println!("opened PR: {} <- {} on {}", export.branch, branch, export.repo);
+    Ok(())
 }

@@ -4,12 +4,16 @@ This roadmap drives the first phase of CapyFun: a working **import** round-trip
 that replays an external repository's commits into a TinyTree monorepo path,
 incrementally and deterministically. Export is deferred until import is solid.
 
-> **Status:** M0–M7 complete. The import round-trip works end to end —
+> **Status:** M0–M8 complete. The import round-trip works end to end —
 > `capyfun import //pkg:name --root <mono>` fetches an origin, mirrors its
 > first-parent history into the package, applies the patch layer, and updates
-> the branch; idempotent and incremental. Verified by `cargo test` and
-> `scripts/smoke-import.sh`. Next: export (M8) and the transform system (T1–T5,
-> see `../design/transformations.md`).
+> the branch; idempotent and incremental. Export (M8) is also implemented:
+> `capyfun export //pkg:name --root <mono>` projects a monorepo path out to a
+> destination repo (prefix stripped) as a pushed branch + GitHub PR, incremental
+> and idempotent via a `CapyFun-Export` commit map. Verified by `cargo test`
+> (`tests/import_test.rs`, `tests/export_test.rs`) and the
+> `scripts/smoke-import.sh` / `scripts/smoke-export.sh` hermetic proofs. Next:
+> the transform system continues (T1–T5, see `../design/transformations.md`).
 
 Read `../../CLAUDE.md` first for the project thesis. Keep each milestone small,
 runnable, and tested. Run `cargo test` and `cargo clippy` before finishing one.
@@ -139,11 +143,25 @@ round-trip (M3–M5) works.
   import, and asserts the monorepo result. Rerunnable from a clean temp dir.
 - Acceptance: smoke script passes from a clean checkout.
 
-### M8+ — Export (deferred)
+### M8 — Export (done)
 
-- Strip the `into` prefix from monorepo-side changes, push a branch to the
-  destination remote, open a GitHub PR (`octocrab` or `gh` shell-out), using the
-  commit map to know what has already shipped. Designed only after import lands.
+- Project a monorepo path out to a destination repo: walk the monorepo's
+  first-parent history for the exported `from` path, replay each changing commit
+  onto the destination branch tip with the `from` prefix **stripped** and CapyFun
+  metadata removed (CapyFun's `SRC`/`patches` dropped, `ORIG_SRC` restored to
+  `SRC` — the inverse of import), author/message preserved, and a
+  `CapyFun-Export: <monorepo-sha>` trailer appended. The trailer is the export
+  side of the commit map, so a re-export knows what has already shipped and is
+  incremental + idempotent (mirrors `last_imported_origin`/`first_parent_delta`).
+- Push the result to a branch on the destination remote and open a GitHub PR
+  (`gh` shell-out); never push to the destination default branch directly. PR
+  creation is skipped (the `gh` command printed) for a local destination
+  (`CAPYFUN_GITHUB_BASE`) or `--no-pr`, so demos/tests stay hermetic.
+- `scripts/smoke-export.sh` builds a local destination + monorepo from scratch,
+  runs an export, asserts the prefix-stripped branch + commit-map trailer landed,
+  simulates a merge, and checks re-export is a no-op and a delta ships. Mirrors
+  `examples/export/` (export config on its own) and the export half of the
+  `demo/`.
 
 ## Roadmap rules
 

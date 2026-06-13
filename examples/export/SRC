@@ -1,0 +1,13 @@
+# Root SRC for an export example monorepo: the workspace anchor.
+#
+# The root SRC declares the `monorepo` singleton (exactly once) and anchors
+# `//`-rooted load paths. The export edge itself is declared in the package that
+# owns the exported source — see `sdk/go/SRC`.
+#
+# Run, pointing CapyFun at this root:
+#   capyfun export //sdk/go:go-sdk --root examples/export
+
+monorepo(
+    name = "acme",
+    default_branch = "main",
+)

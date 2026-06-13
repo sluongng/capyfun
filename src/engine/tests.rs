@@ -1277,3 +1277,123 @@ fn render_prompt_fills_typed_context_vars() {
     // Unknown tokens are left intact.
     assert!(rendered.contains("{{unknown}}"));
 }
+
+// --- M8: export ---
+
+/// Commit messages along `tip`'s first-parent chain (newest first).
+fn chain_messages(repo: &Repository, tip: Oid) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = Some(tip);
+    while let Some(c) = cur {
+        let commit = repo.find_commit(c).unwrap();
+        out.push(commit.message().unwrap().to_owned());
+        cur = commit.parent_ids().next();
+    }
+    out
+}
+
+#[test]
+fn export_strips_prefix_and_capyfun_metadata() {
+    let (_d, repo) = temp_repo();
+    // A monorepo with an export package at `sdk/go`: CapyFun's own SRC + a
+    // patches/ dir (config, must not ship), a buried upstream SRC held as
+    // ORIG_SRC (must be restored), and real source.
+    let tree = write_tree(
+        &repo,
+        &[
+            ("sdk/go/SRC", "github_export(...)"),
+            ("sdk/go/patches/0001.patch", "diff"),
+            ("sdk/go/client.go", "package client"),
+            ("sdk/go/vendor/ORIG_SRC", "upstream src marker"),
+            ("other/unrelated.txt", "ignore me"),
+        ],
+    );
+    let mono = commit(&repo, tree, "add sdk\n", &[]);
+
+    let outcome = export(&repo, "sdk/go", mono, None).unwrap();
+    let head = outcome.head.expect("one commit");
+    assert_eq!(outcome.exported, 1);
+
+    let shipped = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    // Prefix stripped: source at the destination root, not nested under sdk/go.
+    assert_eq!(shipped.get("client.go").map(String::as_str), Some("package client"));
+    // CapyFun's SRC and patches/ are not exported.
+    assert!(!shipped.contains_key("SRC"));
+    assert!(shipped.keys().all(|k| !k.starts_with("patches/")));
+    // The buried upstream marker is restored ORIG_SRC -> SRC.
+    assert_eq!(shipped.get("vendor/SRC").map(String::as_str), Some("upstream src marker"));
+    assert!(!shipped.contains_key("vendor/ORIG_SRC"));
+    // Content outside `from` is never exported.
+    assert!(shipped.keys().all(|k| !k.contains("unrelated")));
+
+    // The commit carries the export-side commit-map trailer pointing at `mono`.
+    let msg = repo.find_commit(head).unwrap().message().unwrap().to_owned();
+    assert!(msg.contains(&format!("{EXPORT_TRAILER}: {mono}")), "trailer: {msg}");
+}
+
+#[test]
+fn export_is_incremental_and_idempotent() {
+    let (_d, repo) = temp_repo();
+
+    // c1 creates the path; c2 leaves it untouched; c3 changes it.
+    let t1 = write_tree(&repo, &[("sdk/SRC", "github_export(...)"), ("sdk/a.txt", "v1")]);
+    let c1 = commit(&repo, t1, "create\n", &[]);
+    let t2 = write_tree(
+        &repo,
+        &[("sdk/SRC", "github_export(...)"), ("sdk/a.txt", "v1"), ("elsewhere.txt", "x")],
+    );
+    let c2 = commit(&repo, t2, "unrelated change\n", &[c1]);
+
+    // First export from scratch: only c1 changed `sdk`, so one dest commit.
+    let first = export(&repo, "sdk", c2, None).unwrap();
+    let dest_tip = first.head.expect("a commit");
+    assert_eq!(first.exported, 1, "commit not touching `sdk` is skipped");
+    assert_eq!(
+        read_tree(&repo, repo.find_commit(dest_tip).unwrap().tree().unwrap().id())
+            .get("a.txt")
+            .map(String::as_str),
+        Some("v1")
+    );
+
+    // Re-export with the dest carrying the commit map: a no-op.
+    let again = export(&repo, "sdk", c2, Some(dest_tip)).unwrap();
+    assert_eq!(again.exported, 0);
+    assert_eq!(again.head, Some(dest_tip));
+
+    // A real change to the path ships exactly one delta commit on top.
+    let t3 = write_tree(
+        &repo,
+        &[("sdk/SRC", "github_export(...)"), ("sdk/a.txt", "v2"), ("elsewhere.txt", "x")],
+    );
+    let c3 = commit(&repo, t3, "bump a\n", &[c2]);
+    let delta = export(&repo, "sdk", c3, Some(dest_tip)).unwrap();
+    let new_tip = delta.head.expect("a commit");
+    assert_eq!(delta.exported, 1);
+    assert_eq!(repo.find_commit(new_tip).unwrap().parent_id(0).unwrap(), dest_tip);
+    assert_eq!(
+        read_tree(&repo, repo.find_commit(new_tip).unwrap().tree().unwrap().id())
+            .get("a.txt")
+            .map(String::as_str),
+        Some("v2")
+    );
+    // Two export commits total on the chain, each with a trailer.
+    let msgs = chain_messages(&repo, new_tip);
+    assert_eq!(msgs.iter().filter(|m| m.contains(EXPORT_TRAILER)).count(), 2);
+}
+
+#[test]
+fn export_preserves_author_and_is_deterministic() {
+    let (_d, repo) = temp_repo();
+    let tree = write_tree(&repo, &[("sdk/SRC", "x"), ("sdk/a.txt", "hi")]);
+    let mono = commit(&repo, tree, "msg\n", &[]);
+
+    let a = export(&repo, "sdk", mono, None).unwrap().head.unwrap();
+    let b = export(&repo, "sdk", mono, None).unwrap().head.unwrap();
+    // Deterministic: same inputs -> same dest commit OID.
+    assert_eq!(a, b);
+    // Authorship is preserved from the monorepo commit.
+    let mc = repo.find_commit(mono).unwrap();
+    let ec = repo.find_commit(a).unwrap();
+    assert_eq!(ec.author().name(), mc.author().name());
+    assert_eq!(ec.committer().name(), mc.committer().name());
+}

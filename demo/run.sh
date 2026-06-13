@@ -60,6 +60,22 @@ echo "==> JS: vendor pinned snapshots (one big SRC, two targets)"
 "$bin" vendor //third_party/js:ansi-styles --root "$work"
 
 echo
+echo "==> Export: ship a monorepo-native path back out as a PR (the other direction)"
+# Import/vendor bring code *in*; export ships a monorepo path *out* to a
+# standalone repo as a PR. Use a local bare destination so the demo stays
+# hermetic (no forge/network); PR creation is skipped and the gh command printed.
+dests="$work/dests"; seed="$work/seed"; dest="$dests/acme/sdk-go"
+mkdir -p "$seed"
+git -C "$seed" init -q -b main
+printf '# acme sdk-go\n' > "$seed/README.md"
+git_c -C "$seed" add -A >/dev/null
+git_c -C "$seed" commit -qm "initial" >/dev/null
+git clone -q --bare "$seed" "$dest"
+CAPYFUN_GITHUB_BASE="$dests" "$bin" export //sdk/go:go-sdk --no-pr --root "$work"
+echo "exported tree on the destination (client/ prefix stripped, no SRC):"
+git -C "$dest" ls-tree -r --name-only capyfun/export-go-sdk | sed 's/^/  /'
+
+echo
 echo "==> result"
 echo "monorepo commits: $(git -C "$work" rev-list --count main)"
 echo "third_party tree:"

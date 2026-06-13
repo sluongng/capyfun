@@ -1,0 +1,14 @@
+# Package //sdk/go: export this SDK out to a standalone GitHub repo as a PR.
+#
+# `from_path` selects the subdirectory to publish (here `client/`); its content
+# ships with that prefix stripped, so the destination repo sees the SDK at its
+# own root. CapyFun's own `SRC` marker is never exported. The export opens a PR
+# against `branch` rather than pushing to it directly — the destination side
+# reviews and merges.
+
+github_export(
+    name = "go-sdk",
+    repo = "acme/sdk-go",      # GitHub "owner/name" of the destination
+    branch = "main",           # branch the PR targets
+    from_path = "client",      # publish sdk/go/client/** at the dest root
+)
