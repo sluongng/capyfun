@@ -120,6 +120,55 @@ fn identical_blobs_dedup() {
     assert_eq!(content_blobs, 1);
 }
 
+/// A built input root packages into a `Tree` and materializes back to an
+/// identical directory (round-trip), including nested dirs and the exec bit.
+#[test]
+fn tree_roundtrip_materialization() {
+    let src = tempfile::tempdir().unwrap();
+    write(&src.path().join("README.md"), "hello\n");
+    write(&src.path().join("src/main.rs"), "fn main() {}\n");
+    write(&src.path().join("src/lib/util.rs"), "pub fn u() {}\n");
+    let script = src.path().join("run.sh");
+    write(&script, "#!/bin/sh\necho hi\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ir = build_input_root(src.path()).unwrap();
+    let tree = tree_from_blobs(&ir.root, &ir.blobs).unwrap();
+
+    // Materialize using the in-memory blob set as the "CAS".
+    let dest = tempfile::tempdir().unwrap();
+    materialize_tree(&tree, dest.path(), |digests| {
+        Ok(digests
+            .iter()
+            .map(|d| ir.blobs[&d.hash].clone())
+            .collect())
+    })
+    .unwrap();
+
+    // The materialized tree hashes to the same root digest.
+    let round = build_input_root(dest.path()).unwrap();
+    assert_eq!(round.root, ir.root);
+    // And the exec bit survived.
+    let mode = fs::metadata(dest.path().join("run.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert!(mode & 0o100 != 0);
+    assert_eq!(fs::read_to_string(dest.path().join("src/lib/util.rs")).unwrap(), "pub fn u() {}\n");
+}
+
+/// `tree_from_blobs` collects every descendant directory exactly once.
+#[test]
+fn tree_collects_all_descendants() {
+    let src = tempfile::tempdir().unwrap();
+    write(&src.path().join("a/b/c/deep.txt"), "deep");
+    write(&src.path().join("a/sibling.txt"), "s");
+    let ir = build_input_root(src.path()).unwrap();
+    let tree = tree_from_blobs(&ir.root, &ir.blobs).unwrap();
+    // root + a + a/b + a/b/c == 4 directories total; children excludes root → 3.
+    assert_eq!(tree.children.len(), 3);
+}
+
 /// A symlink is recorded as a `SymlinkNode` pointing at its target, not followed.
 #[test]
 fn symlink_recorded_as_node() {
