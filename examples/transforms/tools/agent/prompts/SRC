@@ -1,0 +1,21 @@
+# Prompt templates as first-class targets. Package //tools/agent/prompts.
+#
+# Each `prompt_template` wraps a `.tmpl` file so it can be referenced by label
+# and bound with vars via `template(...)` inside an `agent_transform`. Templates
+# reference typed context vars (incoming_diff, changed_files, repo_context,
+# origin_message) plus any user vars passed at the call site.
+
+prompt_template(
+    name = "review",
+    src = "review.tmpl",
+)
+
+prompt_template(
+    name = "port",
+    src = "port.tmpl",
+)
+
+prompt_template(
+    name = "modernize",
+    src = "modernize.tmpl",
+)

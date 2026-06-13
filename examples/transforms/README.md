@@ -15,7 +15,11 @@ examples/transforms/
 │   ├── models/SRC                       # model rules (opus, gpt55, nemotron)
 │   └── agent/
 │       ├── SRC                          # agent rules (harness + model pairings)
-│       └── prompts/port.tmpl            # prompt template (context vars)
+│       └── prompts/
+│           ├── SRC                      # prompt_template targets (review/port/modernize)
+│           ├── review.tmpl
+│           ├── port.tmpl
+│           └── modernize.tmpl
 └── third_party/
     └── widget/
         ├── SRC                          # github_import with a transform pipeline
@@ -35,9 +39,11 @@ A single `github_import` with a transform pipeline spanning both phases:
   `rewrite_message` strips an internal trailer from every commit. The mirror
   stays faithful (each commit maps to its origin) but is consistently rewritten.
 - **Local-modification (tip, once on top):** `apply_patch` pins the toolchain,
-  and `agent_transform` runs a coding agent (`//tools/agent:reviewer`) with a
-  templated prompt to port the change to monorepo conventions. The agent's output
-  is materialized to a content-addressed patch so the import stays reproducible.
+  and two `agent_transform`s run coding agents — `//tools/agent:porter` with the
+  `//tools/agent/prompts:port` template, then `//tools/agent:modernizer` with
+  `//tools/agent/prompts:modernize`. Prompt templates are first-class targets
+  (`prompt_template`), and each agent's output is materialized to a
+  content-addressed patch so the import stays reproducible.
 
 Agents are composable tool dependencies: a `harness` (runtime + plugins/skills
 runfiles) plus a `model` (LLM), paired into an `agent` and referenced by label.

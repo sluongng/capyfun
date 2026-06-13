@@ -1,0 +1,22 @@
+You are reviewing an incoming upstream change before it lands in the monorepo.
+
+Check the change for correctness, security, and fit with our conventions:
+
+{{style}}
+
+## Incoming change
+
+{{origin_message}}
+
+```diff
+{{incoming_diff}}
+```
+
+Touched files: {{changed_files}}
+
+## Surrounding code
+
+{{repo_context}}
+
+Apply only the safe, mechanical fixes the change needs to land cleanly. Output
+only the edits.

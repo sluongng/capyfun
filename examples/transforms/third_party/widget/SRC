@@ -23,9 +23,17 @@ github_import(
         # --- local modifications: applied on top, rebased each import ---
         apply_patch("patches/0001-pin-toolchain.patch"),
         agent_transform(
-            agent = "//tools/agent:reviewer",
+            agent = "//tools/agent:porter",
             prompt = template(
-                "//tools/agent/prompts:port.tmpl",
+                "//tools/agent/prompts:port",          # a prompt_template target
+                vars = {"style": "//docs:STYLE.md"},
+            ),
+            paths = ["lib/**"],
+        ),
+        agent_transform(
+            agent = "//tools/agent:modernizer",
+            prompt = template(
+                "//tools/agent/prompts:modernize",
                 vars = {"style": "//docs:STYLE.md"},
             ),
             paths = ["lib/**"],

@@ -31,7 +31,7 @@ The config has two kinds of typed builtins:
 
 - **Rules** are named, instantiated only in SRC files, and recorded into the IR:
   `monorepo`, `github_import`, `github_export`, and the agent tool rules
-  `harness`, `model`, `agent`.
+  `harness`, `model`, `agent`, `prompt_template`.
 - **Value constructors** are pure functions that *return a typed value* and may
   be used anywhere (including `.scl` libraries, e.g. to define reusable
   transform constants): the transform constructors `replace`, `move`, `copy`,
@@ -139,12 +139,12 @@ change, and captures the agent's edits as a patch in the tip layer.
 
 ```python
 agent_transform(
-    agent = "//tools/agent:reviewer",      # an `agent` rule, by label
+    agent = "//tools/agent:reviewer",         # an `agent` rule, by label
     prompt = template(
-        "//tools/agent/prompts:port.tmpl",
+        "//tools/agent/prompts:review",        # a `prompt_template` rule, by label
         vars = {"style": "//docs:STYLE.md"},
     ),
-    paths = ["lib/**"],                     # optional scope; default = whole subtree
+    paths = ["lib/**"],                        # optional scope; default = whole subtree
 )
 ```
 
@@ -189,9 +189,20 @@ digests, model provider+id)`.
 
 ### Prompt templating
 
-Prompts compose from template files via the `template()` value constructor.
-A template references a fixed set of **typed context vars** injected by the
-engine at execution time, plus user `vars` (strings or file labels):
+Each prompt is a first-class **`prompt_template` rule** that wraps a `.tmpl`
+file, declared in an SRC file and referenced by label — so prompts are
+versioned, reviewable targets like any other rule:
+
+```python
+# //tools/agent/prompts/SRC
+prompt_template(name = "review",    src = "review.tmpl")
+prompt_template(name = "port",      src = "port.tmpl")
+prompt_template(name = "modernize", src = "modernize.tmpl")
+```
+
+The `template()` value constructor binds a `prompt_template` target to call-site
+`vars`. A template references a fixed set of **typed context vars** injected by
+the engine at execution time, plus user `vars` (strings or file labels):
 
 | Context var | Meaning |
 |---|---|
@@ -225,7 +236,8 @@ Hard errors:
 
 - unknown transform constructor (falls out of the closed vocabulary);
 - `agent_transform.agent` does not resolve to an `agent` rule;
-- `template()` path does not resolve, or a referenced var label does not resolve;
+- `template()` does not reference a `prompt_template` target, or a referenced var
+  label does not resolve; a `prompt_template.src` file is missing;
 - `harness.kind` / `model.provider` outside the known set; empty `model.id`;
 - an `agent` whose harness cannot drive its model (e.g. `claude_code` paired with
   an OpenAI model);
