@@ -341,22 +341,45 @@ start them before the plain mirror round-trip works.
 - **T4 — Agent tool rules.** `harness`/`model`/`agent` rules, runfiles
   (plugins/skills) resolution, label references; the `template()` engine and
   typed context vars.
-- **T5 — Generative execution + cache.** Run an agent over inputs, materialize
-  output to a patch, content-addressed cache, `--refresh`; `CapyFun-Agent`
-  trailer. Start with one harness (Claude Code) and one model.
+- **T5 — Generative execution + cache. _(done)_** `capyfun import` now executes
+  the tip layer: it applies `apply_patch` transforms and runs `agent_transform`s
+  in declared order as `CapyFun-Patch` / `CapyFun-Agent` commits on top of the
+  mirror. Each agent runs in a temporary checkout of the destination subtree; its
+  edits are captured as a unified diff in pure libgit2 (diff the edited temp tree
+  against the original subtree), and that **materialized patch** is stored under a
+  content-addressed key (blake3 of `(parent subtree OID, rendered prompt, agent
+  identity)`) at `<repo>/.git/capyfun/agent-cache/<key>.patch`. A cache hit (the
+  default on re-import) replays the recorded patch deterministically; `--refresh`
+  bypasses the cache and regenerates. An agent run that makes no edits creates no
+  commit. The harness is injected behind an `AgentRunner` trait (production:
+  shell out to the CLI with the temp dir as CWD; tests: a deterministic fake), so
+  the whole loop is exercised hermetically with no network. The credential
+  reference is **not** part of the cache identity, so rotating a key does not
+  invalidate output. Started with the CLI harnesses (`claude_code`/`codex`/
+  `antigravity`); `pi` (HTTP, returns text only) is rejected as a file-editing
+  runner.
 
 ## Open questions
 
 - Should `replace`/`move` ever be available as tip transforms (explicit phase
   override), or is phase-by-type sufficient?
 - How is `repo_context` selected for `agent_transform` — whole subtree, changed
-  files plus neighbors, or a declared include set?
+  files plus neighbors, or a declared include set? _(T5 fills it best-effort with
+  the destination subtree's file list; `changed_files` is the same list and
+  `incoming_diff` is the newest mirror commit's first-parent diff. A precise
+  include-set selection driven by the transform's `paths` scope is still open.)_
 - How are harness/model versions pinned and surfaced in the cache key (image
-  digest, CLI version, API snapshot)?
+  digest, CLI version, API snapshot)? _(T5's identity is `(harness kind, model
+  provider+id)`; plugins/skills digests and CLI/API versions are not yet folded
+  in — the `HarnessKind` carries no runfiles digest today.)_
 - ~~How are provider credentials supplied without putting secrets in pure
   config?~~ **Resolved:** config carries an `env:`-scheme credential *reference*
   (default = provider→conventional env var), resolved by the engine at execution
   time; `claude_code` falls through to ambient CLI login. See *Credentials*.
-- Where is the materialized-patch / agent-output store kept (in-repo under a
-  CapyFun dir, or a separate content-addressed store keyed in the commit map)?
+- ~~Where is the materialized-patch / agent-output store kept (in-repo under a
+  CapyFun dir, or a separate content-addressed store keyed in the commit map)?~~
+  **Resolved (T5):** under the repo's git dir at
+  `<repo>/.git/capyfun/agent-cache/<key>.patch`, keyed by a content-addressed
+  blake3 of `(parent subtree OID, rendered prompt, agent identity)`. (Whether
+  this should also be mirrored into a shareable/committed store is still open.)
 - Do generative transforms need a sandbox/network policy at execution time?

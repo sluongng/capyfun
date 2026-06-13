@@ -9,11 +9,14 @@
 > capyfun check --root examples/transforms
 > ```
 >
-> Structural transforms (`replace`/`move`/`copy`/`rewrite_message`) also apply
-> per commit during `capyfun import`. The one remaining milestone is generative
-> **execution** (T5): actually running an `agent_transform` and materializing its
-> output to a content-addressed patch. See
-> `../../docs/design/transformations.md`.
+> Structural transforms (`replace`/`move`/`copy`/`rewrite_message`) apply per
+> commit during `capyfun import`, and the **tip layer now executes** (T5):
+> `apply_patch` and `agent_transform` run in declared order as `CapyFun-Patch` /
+> `CapyFun-Agent` commits on top of the mirror. Each `agent_transform` runs its
+> harness in a temp checkout of the destination subtree, captures the edits as a
+> content-addressed patch under `<repo>/.git/capyfun/agent-cache/`, and replays
+> that patch on re-import (so imports stay reproducible); `--refresh` regenerates.
+> See `../../docs/design/transformations.md`.
 
 ## Layout
 
@@ -77,11 +80,19 @@ of history), runs the real `capyfun import` against it via
 mirror commits tagged `CapyFun-Origin`, plus the toolchain patch applied on top
 as a `CapyFun-Patch` tip commit. It is hermetic (no network) and rerunnable.
 
-This exercises the **implemented plain-mirror path** (`github_import` +
-`patches`); the structural and generative transforms in `widget/SRC` are the
-forward-looking T1–T5 work and are not applied by the script. An import's real
-artifact is git history, so the materialized content lives as commits in the
-script's throwaway monorepo rather than as files checked in here.
+The script writes its own **plain** `github_import` config (mirror + `patches`)
+into a throwaway monorepo, so it exercises the offline mirror + tip-patch path
+with no harness login required. The full transform pipeline in `widget/SRC`
+(structural `replace`/`move`/`rewrite_message` plus the tip `apply_patch` and two
+`agent_transform`s) is now all implemented and executes during `capyfun import`:
+structural transforms rewrite every mirror commit (T2), and the tip layer applies
+patches and runs agents in order (T3/T5). `agent_transform` execution needs a
+logged-in harness CLI (`claude` / `codex` / `agy`), which is why the hermetic
+script keeps to the plain config; once an agent has run, its output is cached as a
+content-addressed patch under `.git/capyfun/agent-cache/`, so re-imports replay it
+offline (and `--refresh` regenerates). An import's real artifact is git history,
+so the materialized content lives as commits in the script's throwaway monorepo
+rather than as files checked in here.
 
 ## Running the agents
 

@@ -119,6 +119,10 @@ struct ImportArgs {
     /// Monorepo root (the directory holding the root `SRC` file).
     #[arg(long, default_value = ".")]
     root: PathBuf,
+    /// Bypass the agent-output cache: re-run every `agent_transform` and
+    /// re-materialize its patch (ignored by `vendor`).
+    #[arg(long)]
+    refresh: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -602,13 +606,25 @@ fn run_import(args: ImportArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
+    // Resolve the declared tip-phase transforms (ordered: apply_patch +
+    // agent_transform) into engine-facing structs. IR resolution and file reads
+    // live here so the engine stays decoupled from `ir`.
+    let tips = resolve_tip_transforms(&ir, import, &args.root)?;
+
+    let runner = capyfun::engine::LiveRunner;
+    let tip_layer = capyfun::engine::TipLayer {
+        patches: &patches,
+        tips: &tips,
+        runner: &runner,
+        refresh: args.refresh,
+    };
     let outcome = capyfun::engine::import(
         &repo,
         &import.dest,
         origin_tip,
         branch_tip,
         &import.transforms,
-        &patches,
+        &tip_layer,
     )?;
 
     match outcome.head {
@@ -623,10 +639,128 @@ fn run_import(args: ImportArgs) -> Result<()> {
                 "imported {} commit(s) for {} into {}; {} now {}",
                 outcome.imported, import.label, import.dest, branch_ref, head
             );
+            let t = &outcome.tip;
+            println!(
+                "tip layer: {} patch commit(s), {} agent commit(s) (cache: {} hit / {} miss)",
+                t.patch_commits, t.agent_commits, t.agent_cache_hits, t.agent_cache_misses
+            );
         }
         _ => println!("{} is already up to date", import.label),
     }
     Ok(())
+}
+
+/// Resolve an import's declared tip-phase transforms into engine [`TipTransform`]s.
+///
+/// `apply_patch` reads the patch bytes from the working tree (mirroring the
+/// `patches=[]` handling); `agent_transform` resolves the agent label →
+/// harness/model, reads the prompt-template `.tmpl` file, and substitutes the
+/// user `vars` (file-label vars are read from disk). Engine-derived context vars
+/// are filled later by the engine.
+fn resolve_tip_transforms(
+    ir: &capyfun::ir::Ir,
+    import: &capyfun::ir::Import,
+    root: &std::path::Path,
+) -> Result<Vec<capyfun::engine::TipTransform>> {
+    use capyfun::transform::Transform;
+
+    let mut out = Vec::new();
+    for t in &import.transforms {
+        match t {
+            Transform::ApplyPatch { file } => {
+                let bytes = std::fs::read(root.join(file))
+                    .with_context(|| format!("reading apply_patch file {file}"))?;
+                out.push(capyfun::engine::TipTransform::Patch(
+                    capyfun::engine::PatchFile {
+                        label: file.clone(),
+                        bytes,
+                    },
+                ));
+            }
+            Transform::AgentTransform {
+                agent,
+                prompt_template,
+                vars,
+                paths,
+            } => {
+                let inv = resolve_agent_invocation(ir, agent, prompt_template, vars, paths, root)?;
+                out.push(capyfun::engine::TipTransform::Agent(inv));
+            }
+            // Mirror-phase transforms are applied per commit, not in the tip.
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve one `agent_transform` into an [`AgentInvocation`]: agent label →
+/// harness kind + model (provider/id/credential), read the prompt-template file,
+/// and substitute the user `vars` (a `//`-label var value is read from the file
+/// it points at; a plain string is used verbatim).
+fn resolve_agent_invocation(
+    ir: &capyfun::ir::Ir,
+    agent_label: &str,
+    prompt_template_label: &str,
+    vars: &[(String, String)],
+    paths: &[String],
+    root: &std::path::Path,
+) -> Result<capyfun::engine::AgentInvocation> {
+    let agent = ir
+        .agents
+        .iter()
+        .find(|a| a.label == agent_label)
+        .ok_or_else(|| anyhow::anyhow!("agent `{agent_label}` does not resolve"))?;
+    let harness = ir
+        .harnesses
+        .iter()
+        .find(|h| h.label == agent.harness)
+        .ok_or_else(|| anyhow::anyhow!("harness `{}` does not resolve", agent.harness))?;
+    let model = ir
+        .models
+        .iter()
+        .find(|m| m.label == agent.model)
+        .ok_or_else(|| anyhow::anyhow!("model `{}` does not resolve", agent.model))?;
+    let prompt_template = ir
+        .prompt_templates
+        .iter()
+        .find(|p| p.label == prompt_template_label)
+        .ok_or_else(|| {
+            anyhow::anyhow!("prompt_template `{prompt_template_label}` does not resolve")
+        })?;
+
+    let kind = capyfun::agent::HarnessKind::parse(&harness.kind)?;
+
+    // Read the template, then substitute the user vars (engine fills context vars).
+    let mut prompt = std::fs::read_to_string(root.join(&prompt_template.src))
+        .with_context(|| format!("reading prompt template {}", prompt_template.src))?;
+    for (key, value) in vars {
+        // A `//`-anchored value is a file label: read its contents; otherwise the
+        // value is a literal string.
+        let rendered = if let Some(rest) = value.strip_prefix("//") {
+            // `//docs:STYLE.md` -> `docs/STYLE.md`; `//path/to/file` -> as-is.
+            let rel = match rest.split_once(':') {
+                Some(("", name)) => name.to_owned(),
+                Some((pkg, name)) => format!("{pkg}/{name}"),
+                None => rest.to_owned(),
+            };
+            std::fs::read_to_string(root.join(&rel))
+                .with_context(|| format!("reading var `{key}` file {value}"))?
+        } else {
+            value.clone()
+        };
+        prompt = prompt.replace(&format!("{{{{{key}}}}}"), &rendered);
+    }
+
+    Ok(capyfun::engine::AgentInvocation {
+        harness: kind,
+        provider: model.provider.clone(),
+        model_id: model.id.clone(),
+        credential: model.credential.clone(),
+        base_url: None,
+        prompt,
+        agent_id: agent.label.clone(),
+        paths: paths.to_vec(),
+    })
 }
 
 fn run_export(args: ExportArgs) -> Result<()> {

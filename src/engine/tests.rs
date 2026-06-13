@@ -33,6 +33,38 @@ fn make_patch(repo: &Repository, old: Oid, new: Oid) -> Vec<u8> {
 /// Filemode for a regular file blob.
 const FILEMODE_BLOB: i32 = 0o100644;
 
+/// A runner that is never expected to be invoked (asserts if it is). Used by the
+/// patch-only `import` tests, where the tip layer has no `agent_transform`.
+struct PanicRunner;
+impl AgentRunner for PanicRunner {
+    fn run(&self, _inv: &AgentInvocation, _prompt: &str, _workdir: &std::path::Path) -> Result<()> {
+        panic!("agent runner must not be called when there are no agent_transforms");
+    }
+}
+
+/// Test wrapper around [`import`] that builds a [`TipLayer`] from the loose args,
+/// keeping the call sites compact.
+#[allow(clippy::too_many_arguments)]
+fn imp(
+    repo: &Repository,
+    dest: &str,
+    origin_tip: Oid,
+    branch_tip: Option<Oid>,
+    transforms: &[Transform],
+    patches: &[PatchFile],
+    tips: &[TipTransform],
+    runner: &dyn AgentRunner,
+    refresh: bool,
+) -> Result<FullImportOutcome> {
+    let tip_layer = TipLayer {
+        patches,
+        tips,
+        runner,
+        refresh,
+    };
+    import(repo, dest, origin_tip, branch_tip, transforms, &tip_layer)
+}
+
 fn temp_repo() -> (tempfile::TempDir, Repository) {
     let dir = tempfile::tempdir().unwrap();
     let repo = Repository::init(dir.path()).unwrap();
@@ -568,18 +600,32 @@ fn import_with_patches_is_idempotent_and_rebases() {
         bytes: make_patch(&repo, sub_v1, sub_v1_patched),
     };
 
-    let first = import(&repo, "dst", c1, None, &[], std::slice::from_ref(&patch)).unwrap();
+    let first = imp(
+        &repo,
+        "dst",
+        c1,
+        None,
+        &[],
+        std::slice::from_ref(&patch),
+        &[],
+        &PanicRunner,
+        false,
+    )
+    .unwrap();
     assert_eq!(first.imported, 1);
     let tip1 = first.head.unwrap();
 
     // Re-run, same upstream + same patch: nothing new, identical tip OID.
-    let again = import(
+    let again = imp(
         &repo,
         "dst",
         c1,
         Some(tip1),
         &[],
         std::slice::from_ref(&patch),
+        &[],
+        &PanicRunner,
+        false,
     )
     .unwrap();
     assert_eq!(again.imported, 0);
@@ -594,13 +640,16 @@ fn import_with_patches_is_idempotent_and_rebases() {
     let v2 = "module acme/widget\n\ngo 1.21\n\n// pad a\n// pad b\n// pad c\n// pad d\n\nrequire cobra v1.9.0\n";
     let sub_v2 = write_tree(&repo, &[("go.mod", v2)]);
     let c2 = commit(&repo, sub_v2, "bump cobra\n", &[c1]);
-    let third = import(
+    let third = imp(
         &repo,
         "dst",
         c2,
         Some(tip1),
         &[],
         std::slice::from_ref(&patch),
+        &[],
+        &PanicRunner,
+        false,
     )
     .unwrap();
     assert_eq!(third.imported, 1, "only c2 is new");
@@ -934,4 +983,297 @@ fn transforms_apply_to_incremental_delta_too() {
             .id(),
     );
     assert_eq!(files.get("dst/f.txt").unwrap(), "NEW b");
+}
+
+// --- T5: agent_transform execution + content-addressed cache ---
+
+use std::cell::Cell;
+use std::path::Path as StdPath;
+
+use agent_exec::PromptContext;
+
+/// A deterministic fake runner: appends a fixed line to `go.mod` in the workdir,
+/// counts how many times it ran, and records the prompt it last saw. Exercises
+/// the materialize → diff → cache → commit loop with no network.
+struct FakeRunner {
+    runs: Cell<usize>,
+    last_prompt: std::cell::RefCell<String>,
+    /// When true the runner makes no edits (a no-op agent).
+    no_op: bool,
+}
+
+impl FakeRunner {
+    fn new() -> Self {
+        Self {
+            runs: Cell::new(0),
+            last_prompt: std::cell::RefCell::new(String::new()),
+            no_op: false,
+        }
+    }
+    fn no_op() -> Self {
+        Self {
+            runs: Cell::new(0),
+            last_prompt: std::cell::RefCell::new(String::new()),
+            no_op: true,
+        }
+    }
+}
+
+impl AgentRunner for FakeRunner {
+    fn run(&self, _inv: &AgentInvocation, prompt: &str, workdir: &StdPath) -> Result<()> {
+        self.runs.set(self.runs.get() + 1);
+        *self.last_prompt.borrow_mut() = prompt.to_owned();
+        if self.no_op {
+            return Ok(());
+        }
+        let go_mod = workdir.join("go.mod");
+        let mut content = std::fs::read_to_string(&go_mod).unwrap_or_default();
+        content.push_str("// edited by agent\n");
+        std::fs::write(&go_mod, content).unwrap();
+        Ok(())
+    }
+}
+
+/// Build a minimal `AgentInvocation` for tests (claude_code + anthropic).
+fn fake_agent(prompt: &str) -> AgentInvocation {
+    AgentInvocation {
+        harness: crate::agent::HarnessKind::ClaudeCode,
+        provider: "anthropic".into(),
+        model_id: "claude-test".into(),
+        credential: None,
+        base_url: None,
+        prompt: prompt.into(),
+        agent_id: "//tools/agent:tester".into(),
+        paths: Vec::new(),
+    }
+}
+
+#[test]
+fn agent_transform_commits_caches_and_is_idempotent() {
+    let (_d, repo) = temp_repo();
+    let sub0 = write_tree(&repo, &[("go.mod", "module x\n\ngo 1.21\n")]);
+    let c1 = commit(&repo, sub0, "init\n", &[]);
+
+    let runner = FakeRunner::new();
+    let tips = vec![TipTransform::Agent(fake_agent("port {{origin_message}}"))];
+
+    let first = imp(&repo, "dst", c1, None, &[], &[], &tips, &runner, false).unwrap();
+    assert_eq!(first.imported, 1, "one mirror commit");
+    assert_eq!(first.tip.agent_commits, 1, "one agent commit");
+    assert_eq!(first.tip.agent_cache_misses, 1, "first run is a cache miss");
+    assert_eq!(first.tip.agent_cache_hits, 0);
+    assert_eq!(runner.runs.get(), 1, "runner invoked once");
+    let tip1 = first.tip.head.unwrap();
+
+    // The tip commit carries the CapyFun-Agent trailer.
+    let tip_commit = repo.find_commit(tip1).unwrap();
+    assert!(has_trailer(tip_commit.message().unwrap(), AGENT_TRAILER));
+    assert_eq!(
+        trailer_value(tip_commit.message().unwrap(), AGENT_TRAILER).as_deref(),
+        Some("//tools/agent:tester")
+    );
+
+    // The agent's edit landed under dest.
+    let files = read_tree(&repo, tip_commit.tree().unwrap().id());
+    assert!(
+        files.get("dst/go.mod").unwrap().contains("edited by agent"),
+        "agent edit materialized: {:?}",
+        files.get("dst/go.mod")
+    );
+
+    // A patch was materialized and cached on disk.
+    let cache_dir = repo.path().join("capyfun/agent-cache");
+    let cached: Vec<_> = std::fs::read_dir(&cache_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(cached.len(), 1, "exactly one cached patch");
+
+    // The prompt was rendered with the engine context var ({{origin_message}}).
+    assert!(
+        runner.last_prompt.borrow().contains("init"),
+        "rendered prompt should fold in origin_message: {}",
+        runner.last_prompt.borrow()
+    );
+
+    // Re-import with the same upstream tip: idempotent. The agent is served from
+    // cache (runner NOT invoked again) and the tip OID is reproduced exactly.
+    let again = imp(
+        &repo,
+        "dst",
+        c1,
+        Some(tip1),
+        &[],
+        &[],
+        &tips,
+        &runner,
+        false,
+    )
+    .unwrap();
+    assert_eq!(again.imported, 0, "no new upstream commits");
+    assert_eq!(again.tip.agent_cache_hits, 1, "served from cache");
+    assert_eq!(again.tip.agent_cache_misses, 0);
+    assert_eq!(runner.runs.get(), 1, "runner not called again on re-import");
+    assert_eq!(again.tip.head, Some(tip1), "re-import reproduces the same tip OID");
+}
+
+#[test]
+fn agent_cache_hit_replays_without_running() {
+    let (_d, repo) = temp_repo();
+    let sub0 = write_tree(&repo, &[("go.mod", "module x\n")]);
+    let c1 = commit(&repo, sub0, "init\n", &[]);
+
+    // First import populates the cache with a real runner.
+    let live = FakeRunner::new();
+    let tips = vec![TipTransform::Agent(fake_agent("hi"))];
+    let first = imp(&repo, "dst", c1, None, &[], &[], &tips, &live, false).unwrap();
+    let tip1 = first.tip.head.unwrap();
+    assert_eq!(live.runs.get(), 1);
+
+    // Strip the tip layer by re-importing onto a fresh branch base, but with a
+    // PanicRunner: the cache hit must replay the recorded patch without invoking
+    // the runner. (Same inputs => same cache key => hit.)
+    let second = imp(
+        &repo,
+        "dst",
+        c1,
+        Some(tip1),
+        &[],
+        &[],
+        &tips,
+        &PanicRunner,
+        false,
+    )
+    .unwrap();
+    assert_eq!(second.tip.agent_cache_hits, 1);
+    assert_eq!(second.tip.head, Some(tip1));
+}
+
+#[test]
+fn refresh_bypasses_the_agent_cache() {
+    let (_d, repo) = temp_repo();
+    let sub0 = write_tree(&repo, &[("go.mod", "module x\n")]);
+    let c1 = commit(&repo, sub0, "init\n", &[]);
+
+    let runner = FakeRunner::new();
+    let tips = vec![TipTransform::Agent(fake_agent("hi"))];
+    let first = imp(&repo, "dst", c1, None, &[], &[], &tips, &runner, false).unwrap();
+    let tip1 = first.tip.head.unwrap();
+    assert_eq!(runner.runs.get(), 1);
+
+    // --refresh re-runs the agent even though the cache entry exists.
+    let refreshed = imp(
+        &repo,
+        "dst",
+        c1,
+        Some(tip1),
+        &[],
+        &[],
+        &tips,
+        &runner,
+        true,
+    )
+    .unwrap();
+    assert_eq!(runner.runs.get(), 2, "refresh re-invokes the runner");
+    assert_eq!(refreshed.tip.agent_cache_misses, 1);
+    // Deterministic fake edit => identical materialized patch => identical tip.
+    assert_eq!(refreshed.tip.head, Some(tip1));
+}
+
+#[test]
+fn no_op_agent_creates_no_commit() {
+    let (_d, repo) = temp_repo();
+    let sub0 = write_tree(&repo, &[("go.mod", "module x\n")]);
+    let c1 = commit(&repo, sub0, "init\n", &[]);
+
+    let runner = FakeRunner::no_op();
+    let tips = vec![TipTransform::Agent(fake_agent("hi"))];
+    let out = imp(&repo, "dst", c1, None, &[], &[], &tips, &runner, false).unwrap();
+
+    assert_eq!(out.tip.agent_commits, 0, "no edits => no commit");
+    assert_eq!(runner.runs.get(), 1, "runner still ran");
+    // Tip equals the mirror tip (no agent commit on top).
+    let tip = out.tip.head.unwrap();
+    let tip_commit = repo.find_commit(tip).unwrap();
+    assert!(
+        !has_trailer(tip_commit.message().unwrap(), AGENT_TRAILER),
+        "tip should be the mirror commit, not an agent commit"
+    );
+    assert_eq!(
+        parse_origin_trailer(tip_commit.message().unwrap()).as_deref(),
+        Some(c1.to_string().as_str())
+    );
+}
+
+#[test]
+fn patch_then_agent_tip_layer_ordering_and_strip() {
+    let (_d, repo) = temp_repo();
+    let v1 = "module x\n\ngo 1.21\n\n// pad a\n// pad b\n// pad c\n";
+    let sub0 = write_tree(&repo, &[("go.mod", v1)]);
+    let c1 = commit(&repo, sub0, "init\n", &[]);
+
+    // A static patch adding a toolchain line.
+    let v1_patched = "module x\n\ngo 1.21\ntoolchain go1.21.6\n\n// pad a\n// pad b\n// pad c\n";
+    let sub1 = write_tree(&repo, &[("go.mod", v1_patched)]);
+    let patch = PatchFile {
+        label: "patches/0001.patch".into(),
+        bytes: make_patch(&repo, sub0, sub1),
+    };
+
+    let runner = FakeRunner::new();
+    let tips = vec![
+        TipTransform::Patch(patch.clone()),
+        TipTransform::Agent(fake_agent("hi")),
+    ];
+    let out = imp(&repo, "dst", c1, None, &[], &[], &tips, &runner, false).unwrap();
+    assert_eq!(out.tip.patch_commits, 1);
+    assert_eq!(out.tip.agent_commits, 1);
+    let tip = out.tip.head.unwrap();
+
+    // Top is the agent commit; its parent is the patch commit; grandparent the
+    // mirror commit.
+    let agent_c = repo.find_commit(tip).unwrap();
+    assert!(has_trailer(agent_c.message().unwrap(), AGENT_TRAILER));
+    let patch_c = repo.find_commit(agent_c.parent_id(0).unwrap()).unwrap();
+    assert!(has_trailer(patch_c.message().unwrap(), PATCH_TRAILER));
+    let mirror_c = repo.find_commit(patch_c.parent_id(0).unwrap()).unwrap();
+    assert_eq!(
+        parse_origin_trailer(mirror_c.message().unwrap()).as_deref(),
+        Some(c1.to_string().as_str())
+    );
+
+    // The dest has both modifications.
+    let files = read_tree(&repo, agent_c.tree().unwrap().id());
+    let go_mod = files.get("dst/go.mod").unwrap();
+    assert!(go_mod.contains("toolchain go1.21.6"), "patch applied");
+    assert!(go_mod.contains("edited by agent"), "agent edit applied");
+
+    // strip_tip_layer drops BOTH the patch and agent tip commits.
+    let stripped = strip_tip_layer(&repo, Some(tip), "dst").unwrap().unwrap();
+    assert_eq!(
+        parse_origin_trailer(repo.find_commit(stripped).unwrap().message().unwrap())
+            .as_deref(),
+        Some(c1.to_string().as_str()),
+        "stripping the tip layer returns the mirror tip"
+    );
+}
+
+#[test]
+fn render_prompt_fills_typed_context_vars() {
+    let ctx = PromptContext {
+        origin_commit: "abc123".into(),
+        origin_message: "fix bug".into(),
+        changed_files: "a.go\nb.go".into(),
+        incoming_diff: "diff body".into(),
+        repo_context: "a.go\nb.go".into(),
+    };
+    let rendered = agent_exec::render_prompt(
+        "commit {{origin_commit}}: {{origin_message}}\nfiles: {{changed_files}}\n{{incoming_diff}}\n{{unknown}}",
+        &ctx,
+    );
+    assert!(rendered.contains("commit abc123: fix bug"));
+    assert!(rendered.contains("files: a.go\nb.go"));
+    assert!(rendered.contains("diff body"));
+    // Unknown tokens are left intact.
+    assert!(rendered.contains("{{unknown}}"));
 }

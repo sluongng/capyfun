@@ -7,12 +7,20 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use git2::{Commit, Diff, Oid, Repository, Signature, Time, Tree};
+use git2::{Commit, Diff, DiffFormat, Oid, Repository, Signature, Time, Tree};
 
 use crate::transform::Transform;
 
+pub mod agent_exec;
+
+pub use agent_exec::{AgentInvocation, AgentRunner, LiveRunner, PromptContext};
+
 /// Git filemode for a tree (subdirectory) entry.
 const FILEMODE_TREE: i32 = 0o040000;
+/// Git filemode for a regular (non-executable) file blob.
+const FILEMODE_BLOB: i32 = 0o100644;
+/// Git filemode for an executable file blob.
+const FILEMODE_BLOB_EXECUTABLE: i32 = 0o100755;
 
 /// Commit-message trailer recording the origin commit a mirror commit reflects.
 /// This trailer is the durable commit map: greppable, clone-surviving, and the
@@ -25,6 +33,10 @@ pub const IMPORT_TRAILER: &str = "CapyFun-Import";
 
 /// Commit-message trailer marking a CapyFun-authored patch-layer commit.
 pub const PATCH_TRAILER: &str = "CapyFun-Patch";
+
+/// Commit-message trailer marking a CapyFun-authored `agent_transform` commit.
+/// Its value is the agent's label (e.g. `//tools/agent:porter`).
+pub const AGENT_TRAILER: &str = "CapyFun-Agent";
 
 /// The value of the last (bottom-most reading, i.e. most recent) `key:` trailer.
 fn trailer_value(message: &str, key: &str) -> Option<String> {
@@ -497,19 +509,21 @@ pub fn apply_patch_layer(
     Ok(head)
 }
 
-/// Strip this import's patch-layer commits from the top of `tip`, returning the
-/// underlying mirror tip. Only commits that are this `dest`'s patch commits are
-/// removed, so an import whose commits sit at the branch tip can rebase its own
-/// patch layer. (If a *different* import's commits sit on top, this stops at
-/// them; re-importing a buried import is out of scope — use per-import refs.)
-fn strip_patch_layer(repo: &Repository, tip: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
+/// Strip this import's tip-layer commits from the top of `tip`, returning the
+/// underlying mirror tip. Both `CapyFun-Patch` (`apply_patch`) and
+/// `CapyFun-Agent` (`agent_transform`) commits scoped to this `dest` are removed,
+/// so an import whose commits sit at the branch tip can rebase its whole tip
+/// layer. (If a *different* import's commits sit on top, this stops at them;
+/// re-importing a buried import is out of scope — use per-import refs.)
+fn strip_tip_layer(repo: &Repository, tip: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
     let mut cur = tip;
     while let Some(c) = cur {
         let commit = repo.find_commit(c)?;
         let message = commit.message().unwrap_or("");
-        let is_our_patch = has_trailer(message, PATCH_TRAILER)
-            && trailer_value(message, IMPORT_TRAILER).as_deref() == Some(dest);
-        if is_our_patch {
+        let scoped = trailer_value(message, IMPORT_TRAILER).as_deref() == Some(dest);
+        let is_our_tip =
+            scoped && (has_trailer(message, PATCH_TRAILER) || has_trailer(message, AGENT_TRAILER));
+        if is_our_tip {
             cur = commit.parent_ids().next();
         } else {
             break;
@@ -523,33 +537,489 @@ fn has_trailer(message: &str, key: &str) -> bool {
     message.lines().any(|l| l.trim().starts_with(&prefix))
 }
 
-/// Full import: mirror the origin's first-parent history, then (re)apply the
-/// patch layer on top. Idempotent — re-running with no new upstream commits and
-/// the same patches reproduces the same tip OID (the patch layer is dropped and
-/// deterministically re-applied).
+/// A resolved tip-phase transform the engine applies once on top of the mirror.
+///
+/// This is the engine-facing form of [`Transform::ApplyPatch`] /
+/// [`Transform::AgentTransform`]: the caller has read the patch bytes and
+/// resolved the agent (harness/model/prompt) so the engine stays decoupled from
+/// [`crate::ir`].
+#[derive(Clone)]
+pub enum TipTransform {
+    /// A static unified-diff patch (the `apply_patch` transform / `patches=[]`).
+    Patch(PatchFile),
+    /// A generative `agent_transform`: run an agent, materialize its edits.
+    Agent(AgentInvocation),
+}
+
+/// Whether an agent run was served from cache or freshly generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCacheStatus {
+    Hit,
+    Miss,
+}
+
+/// Result of (re)applying the tip layer: the new tip plus a per-kind tally.
+#[derive(Debug, Clone, Default)]
+pub struct TipOutcome {
+    pub head: Option<Oid>,
+    /// `apply_patch` commits created.
+    pub patch_commits: usize,
+    /// `agent_transform` commits created (no-op agent runs are not counted).
+    pub agent_commits: usize,
+    /// Agent runs served from the content-addressed cache.
+    pub agent_cache_hits: usize,
+    /// Agent runs that invoked the runner (cache miss / `--refresh`).
+    pub agent_cache_misses: usize,
+}
+
+/// Apply an ordered tip layer (`apply_patch` + `agent_transform`) on top of
+/// `mirror_tip`, returning the new tip and a tally. A patch that fails to apply
+/// (or an agent run that errors) aborts with a clear error; since no ref is moved
+/// here, nothing is half-written.
+///
+/// `ctx` supplies the engine-derived prompt context vars; `runner` executes
+/// agent transforms; `refresh` bypasses the agent cache.
+pub fn apply_tip_layer(
+    repo: &Repository,
+    dest: &str,
+    mirror_tip: Oid,
+    tips: &[TipTransform],
+    runner: &dyn AgentRunner,
+    ctx: &PromptContext,
+    refresh: bool,
+) -> Result<TipOutcome> {
+    let sig = capyfun_signature()?;
+    let mut head = mirror_tip;
+    let mut outcome = TipOutcome {
+        head: Some(mirror_tip),
+        ..Default::default()
+    };
+
+    for tip in tips {
+        let parent = repo.find_commit(head)?;
+        match tip {
+            TipTransform::Patch(patch) => {
+                let new_tree_oid =
+                    apply_patch_to_tree(repo, parent.tree()?.id(), dest, &patch.bytes)
+                        .with_context(|| format!("applying patch {}", patch.label))?;
+                let new_tree = repo.find_tree(new_tree_oid)?;
+                let message = format!(
+                    "Apply patch {}\n\n{PATCH_TRAILER}: {}\n{IMPORT_TRAILER}: {dest}\n",
+                    patch.label, patch.label
+                );
+                head = repo.commit(None, &sig, &sig, &message, &new_tree, &[&parent])?;
+                outcome.patch_commits += 1;
+            }
+            TipTransform::Agent(inv) => {
+                let (patch, status) =
+                    materialize_agent_patch(repo, dest, parent.tree()?.id(), inv, runner, ctx, refresh)
+                        .with_context(|| format!("running agent_transform {}", inv.agent_id))?;
+                match status {
+                    AgentCacheStatus::Hit => outcome.agent_cache_hits += 1,
+                    AgentCacheStatus::Miss => outcome.agent_cache_misses += 1,
+                }
+                // An empty patch means the agent made no changes: skip the commit.
+                if patch.is_empty() {
+                    continue;
+                }
+                let new_tree_oid = apply_patch_to_tree(repo, parent.tree()?.id(), dest, &patch)
+                    .with_context(|| {
+                        format!("applying materialized patch for agent {}", inv.agent_id)
+                    })?;
+                let new_tree = repo.find_tree(new_tree_oid)?;
+                let message = format!(
+                    "Apply agent_transform {}\n\n{AGENT_TRAILER}: {}\n{IMPORT_TRAILER}: {dest}\n",
+                    inv.agent_id, inv.agent_id
+                );
+                head = repo.commit(None, &sig, &sig, &message, &new_tree, &[&parent])?;
+                outcome.agent_commits += 1;
+            }
+        }
+    }
+    outcome.head = Some(head);
+    Ok(outcome)
+}
+
+// --- T5: agent_transform materialization + content-addressed cache ---
+
+/// Directory under the repo's git dir holding materialized agent patches, keyed
+/// by content-addressed cache key.
+const AGENT_CACHE_DIR: &[&str] = &["capyfun", "agent-cache"];
+
+/// The cache key for an agent run: a blake3 hash of `(parent subtree OID at dest,
+/// rendered prompt, agent identity)`. The credential is deliberately excluded
+/// (see [`AgentInvocation::identity`]), so rotating a key does not invalidate
+/// materialized output. Deterministic in its inputs.
+fn agent_cache_key(parent_subtree: Oid, rendered_prompt: &str, inv: &AgentInvocation) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(parent_subtree.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(rendered_prompt.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(inv.identity().as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// The on-disk path of a cache entry under `<repo>/.git/capyfun/agent-cache/`.
+fn agent_cache_path(repo: &Repository, key: &str) -> std::path::PathBuf {
+    let mut p = repo.path().to_path_buf();
+    for seg in AGENT_CACHE_DIR {
+        p.push(seg);
+    }
+    p.push(format!("{key}.patch"));
+    p
+}
+
+/// The destination subtree OID within a tree, or `None` if `dest` is absent.
+fn subtree_oid(repo: &Repository, tree: Oid, dest: &str) -> Result<Option<Oid>> {
+    let tree = repo.find_tree(tree)?;
+    match tree.get_path(Path::new(dest)) {
+        Ok(e) if e.kind() == Some(git2::ObjectType::Tree) => Ok(Some(e.id())),
+        _ => Ok(None),
+    }
+}
+
+/// Produce the materialized patch for an `agent_transform`, using the
+/// content-addressed cache. On a cache hit (and not `refresh`) the recorded
+/// patch is loaded and replayed deterministically; on a miss (or `refresh`) the
+/// agent runs in a temp checkout, its edits are captured as a unified diff in
+/// pure libgit2, the patch is stored under the cache key, and returned.
+///
+/// Returns the patch bytes (empty if the agent made no changes) and whether it
+/// was a cache hit or miss.
+fn materialize_agent_patch(
+    repo: &Repository,
+    dest: &str,
+    parent_tree: Oid,
+    inv: &AgentInvocation,
+    runner: &dyn AgentRunner,
+    ctx: &PromptContext,
+    refresh: bool,
+) -> Result<(Vec<u8>, AgentCacheStatus)> {
+    let before = subtree_oid(repo, parent_tree, dest)?
+        .with_context(|| format!("destination `{dest}` not found for agent {}", inv.agent_id))?;
+    let prompt = agent_exec::render_prompt(&inv.prompt, ctx);
+    let key = agent_cache_key(before, &prompt, inv);
+    let cache_path = agent_cache_path(repo, &key);
+
+    if !refresh && cache_path.exists() {
+        let bytes = std::fs::read(&cache_path)
+            .with_context(|| format!("reading cached agent patch {}", cache_path.display()))?;
+        return Ok((bytes, AgentCacheStatus::Hit));
+    }
+
+    // Cache miss (or refresh): check the subtree out, run the agent, diff back.
+    let workdir = tempfile::tempdir().context("creating agent workdir")?;
+    checkout_tree_to_dir(repo, before, workdir.path())
+        .with_context(|| format!("checking out subtree for agent {}", inv.agent_id))?;
+    runner
+        .run(inv, &prompt, workdir.path())
+        .with_context(|| format!("agent {} run", inv.agent_id))?;
+    let after = read_dir_to_tree(repo, workdir.path())
+        .with_context(|| format!("reading edited subtree for agent {}", inv.agent_id))?;
+
+    let patch = diff_trees_to_patch(repo, before, after)?;
+
+    // Store the materialized patch (the durable artifact) under the cache key.
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating agent cache dir {}", parent.display()))?;
+    }
+    std::fs::write(&cache_path, &patch)
+        .with_context(|| format!("writing agent patch {}", cache_path.display()))?;
+
+    Ok((patch, AgentCacheStatus::Miss))
+}
+
+/// Materialize the blobs of `tree` into `dir` on disk (recursively), so a harness
+/// can edit them in place. Only regular/executable file blobs are written;
+/// symlinks/submodules are skipped (out of scope for agent edits).
+fn checkout_tree_to_dir(repo: &Repository, tree: Oid, dir: &Path) -> Result<()> {
+    let tree = repo.find_tree(tree)?;
+    for entry in tree.iter() {
+        let name = entry.name().context("non-UTF-8 tree entry name")?;
+        let path = dir.join(name);
+        match entry.kind() {
+            Some(git2::ObjectType::Tree) => {
+                std::fs::create_dir_all(&path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+                checkout_tree_to_dir(repo, entry.id(), &path)?;
+            }
+            Some(git2::ObjectType::Blob) => {
+                let blob = repo.find_blob(entry.id())?;
+                std::fs::write(&path, blob.content())
+                    .with_context(|| format!("writing {}", path.display()))?;
+                set_executable(&path, entry.filemode() == FILEMODE_BLOB_EXECUTABLE)?;
+            }
+            // Symlinks, submodules: not editable subtree content; skip.
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path, exec: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if exec {
+        let mut perms = std::fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path, _exec: bool) -> Result<()> {
+    Ok(())
+}
+
+/// Read a directory tree from disk back into a Git tree object, returning its
+/// OID. The inverse of [`checkout_tree_to_dir`]; this is the "after" tree used to
+/// diff the agent's edits. Files keep their executable bit; directories recurse.
+fn read_dir_to_tree(repo: &Repository, dir: &Path) -> Result<Oid> {
+    let mut builder = repo.treebuilder(None)?;
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading dir {}", dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    // Sort for determinism (treebuilder order does not matter for the OID, but a
+    // stable walk keeps behavior predictable).
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("non-UTF-8 filename in agent workdir"))?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let child = read_dir_to_tree(repo, &path)?;
+            // Skip empty directories (Git does not track them).
+            if !repo.find_tree(child)?.is_empty() {
+                builder.insert(&name, child, FILEMODE_TREE)?;
+            }
+        } else if file_type.is_file() {
+            let content = std::fs::read(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let oid = repo.blob(&content)?;
+            let mode = if is_executable(&path)? {
+                FILEMODE_BLOB_EXECUTABLE
+            } else {
+                FILEMODE_BLOB
+            };
+            builder.insert(&name, oid, mode)?;
+        }
+        // Symlinks etc.: skip (not editable subtree content).
+    }
+    Ok(builder.write()?)
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    Ok(mode & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+/// Diff two subtrees into a unified-diff patch buffer compatible with
+/// [`apply_patch_to_tree`] / [`strip_patch_preamble`], in pure libgit2. The
+/// paths in the patch are subtree-relative (no `dest` prefix), so the result
+/// applies within `dest` exactly like a static `apply_patch` patch. An empty
+/// patch (`before == after`) yields empty bytes.
+fn diff_trees_to_patch(repo: &Repository, before: Oid, after: Oid) -> Result<Vec<u8>> {
+    if before == after {
+        return Ok(Vec::new());
+    }
+    let before_tree = repo.find_tree(before)?;
+    let after_tree = repo.find_tree(after)?;
+    let diff = repo.diff_tree_to_tree(Some(&before_tree), Some(&after_tree), None)?;
+    let mut buf = Vec::new();
+    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        if matches!(line.origin(), '+' | '-' | ' ') {
+            buf.push(line.origin() as u8);
+        }
+        buf.extend_from_slice(line.content());
+        true
+    })?;
+    Ok(buf)
+}
+
+/// Outcome of a full import, including the tip-layer tally.
+#[derive(Debug, Clone)]
+pub struct FullImportOutcome {
+    /// Mirror commits imported this run.
+    pub imported: usize,
+    /// The resulting tip after the tip layer is (re)applied.
+    pub head: Option<Oid>,
+    /// Per-kind tip-layer tally (patch/agent commits, cache hits/misses).
+    pub tip: TipOutcome,
+}
+
+/// The tip-layer inputs and execution policy for an [`import`]: the static
+/// `patches=[]` series (applied first), the declared tip transforms (applied in
+/// order after), the [`AgentRunner`] that executes `agent_transform`s, and
+/// whether to bypass the agent cache (`refresh`). Bundled into one struct so the
+/// [`import`] signature stays small.
+pub struct TipLayer<'a> {
+    /// The `patches = [...]` series, applied first as `CapyFun-Patch` commits.
+    pub patches: &'a [PatchFile],
+    /// Declared tip transforms (`apply_patch` + `agent_transform`), in order.
+    pub tips: &'a [TipTransform],
+    /// Executes `agent_transform`s (the live harness, or a fake in tests).
+    pub runner: &'a dyn AgentRunner,
+    /// Bypass the content-addressed agent cache and re-run every agent.
+    pub refresh: bool,
+}
+
+/// Full import: mirror the origin's first-parent history, then (re)apply the tip
+/// layer (`patches=[]` first, then the ordered tip transforms) on top.
+///
+/// Idempotent — re-running with no new upstream commits and the same tip
+/// transforms reproduces the same tip OID. The tip layer is dropped (both
+/// `CapyFun-Patch` and `CapyFun-Agent` commits) and deterministically
+/// re-applied; agent output is replayed from the content-addressed cache, so a
+/// no-op re-import yields identical OIDs.
 pub fn import(
     repo: &Repository,
     dest: &str,
     origin_tip: Oid,
     branch_tip: Option<Oid>,
     transforms: &[Transform],
-    patches: &[PatchFile],
-) -> Result<ImportOutcome> {
-    let mirror_base = strip_patch_layer(repo, branch_tip, dest)?;
+    tip_layer: &TipLayer,
+) -> Result<FullImportOutcome> {
+    let mirror_base = strip_tip_layer(repo, branch_tip, dest)?;
     let mirror = import_mirror(repo, dest, origin_tip, mirror_base, transforms)?;
 
-    let head = match (mirror.head, patches.is_empty()) {
-        (_, true) => mirror.head,
-        (Some(mirror_tip), false) => Some(apply_patch_layer(repo, dest, mirror_tip, patches)?),
-        (None, false) => {
-            anyhow::bail!("cannot apply patches: the import produced no commits")
-        }
+    // Build the prompt context from the newest mirror commit + the dest subtree.
+    let ctx = match mirror.head {
+        Some(tip) => prompt_context(repo, dest, tip)?,
+        None => PromptContext::default(),
     };
 
-    Ok(ImportOutcome {
+    // The tip layer is the `patches=[]` series first, then the ordered tip
+    // transforms — a single combined list applied in one pass so ordering and
+    // the running parent stay correct.
+    let combined: Vec<TipTransform> = tip_layer
+        .patches
+        .iter()
+        .cloned()
+        .map(TipTransform::Patch)
+        .chain(tip_layer.tips.iter().cloned())
+        .collect();
+
+    let (head, tip_outcome) = if combined.is_empty() {
+        (
+            mirror.head,
+            TipOutcome {
+                head: mirror.head,
+                ..Default::default()
+            },
+        )
+    } else {
+        let mirror_tip = mirror
+            .head
+            .context("cannot apply tip layer: the import produced no commits")?;
+        let outcome = apply_tip_layer(
+            repo,
+            dest,
+            mirror_tip,
+            &combined,
+            tip_layer.runner,
+            &ctx,
+            tip_layer.refresh,
+        )?;
+        (outcome.head, outcome)
+    };
+
+    Ok(FullImportOutcome {
         imported: mirror.imported,
         head,
+        tip: tip_outcome,
     })
+}
+
+/// Build the typed prompt context for an `agent_transform` from the newest mirror
+/// commit (`mirror_tip`) and the destination subtree. `incoming_diff` is the
+/// newest mirror commit's diff against its first parent (best-effort: empty for a
+/// root commit); `repo_context`/`changed_files` are the subtree's file list
+/// (best-effort — a full include-set selection is future work, see the open
+/// questions in `docs/design/transformations.md`).
+fn prompt_context(repo: &Repository, dest: &str, mirror_tip: Oid) -> Result<PromptContext> {
+    let tip = repo.find_commit(mirror_tip)?;
+    let origin_commit = parse_origin_trailer(tip.message().unwrap_or("")).unwrap_or_default();
+    let origin_message = tip
+        .message()
+        .unwrap_or("")
+        .lines()
+        .take_while(|l| !l.trim_start().starts_with(ORIGIN_TRAILER))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned();
+
+    // The dest subtree file list (best-effort `repo_context`/`changed_files`).
+    let files = match subtree_oid(repo, tip.tree()?.id(), dest)? {
+        Some(sub) => subtree_file_list(repo, sub)?,
+        None => Vec::new(),
+    };
+    let file_list = files.join("\n");
+
+    // `incoming_diff`: the newest mirror commit's diff vs its first parent.
+    let incoming_diff = match tip.parent(0).ok() {
+        Some(parent) => {
+            let diff =
+                repo.diff_tree_to_tree(Some(&parent.tree()?), Some(&tip.tree()?), None)?;
+            let mut buf = Vec::new();
+            diff.print(DiffFormat::Patch, |_d, _h, line| {
+                if matches!(line.origin(), '+' | '-' | ' ') {
+                    buf.push(line.origin() as u8);
+                }
+                buf.extend_from_slice(line.content());
+                true
+            })?;
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+        None => String::new(),
+    };
+
+    Ok(PromptContext {
+        origin_commit,
+        origin_message,
+        changed_files: file_list.clone(),
+        incoming_diff,
+        repo_context: file_list,
+    })
+}
+
+/// The sorted subtree-relative blob paths of `subtree`.
+fn subtree_file_list(repo: &Repository, subtree: Oid) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    list_blobs(repo, subtree, "", &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn list_blobs(repo: &Repository, tree: Oid, prefix: &str, out: &mut Vec<String>) -> Result<()> {
+    let tree = repo.find_tree(tree)?;
+    for entry in tree.iter() {
+        let name = entry.name().context("non-UTF-8 tree entry name")?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match entry.kind() {
+            Some(git2::ObjectType::Tree) => list_blobs(repo, entry.id(), &path, out)?,
+            Some(git2::ObjectType::Blob) => out.push(path),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 // --- T2: structural transforms (mirror-time, applied per replayed commit) ---
