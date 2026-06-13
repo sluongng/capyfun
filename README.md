@@ -256,6 +256,47 @@ Design docs live in [`docs/`](docs/):
 
 ---
 
+## Runtime: from a laptop to a distributed agent farm
+
+Everything above runs **locally today** — the automation poller consumes events
+on one machine, and every agent transform is orchestrated against the local
+checkout of the code. That is the right shape for a hackathon and for proving the
+import/export round-trip, but it is not where this is headed.
+
+The future runtime moves the same loop off the laptop:
+
+- **Distributed event consumption.** Instead of a single-process poller, events
+  (GH-Archive firehose, GitHub App webhooks, `ls-remote` backstop) land on a
+  distributed server that fans them out to workers. The discipline is unchanged
+  — **events are hints, the commit map is the source of truth** — so the server
+  is level-triggered and crash-safe: it can drop or replay events without
+  corrupting state.
+- **A farm of compute sandboxes.** Agent transforms stop running against a local
+  working tree and instead run in a farm of ephemeral, isolated sandboxes — each
+  hydrated from the content-addressed tree it needs, each producing a
+  content-addressed patch. Because agent output is already content-addressed,
+  this maps cleanly onto **Bazel RBE + remote cache**: identical
+  `(tree, agent, model, prompt)` work dedups for free, and a result computed once
+  in the farm is reused everywhere.
+- **Quota & spend governance.** Running agents at fleet scale needs guardrails.
+  A quota system tracks **concurrency** (how many sandboxes a given import/export
+  edge or tenant may run at once) and **spend** (token/compute budget per agent
+  session), enforced before a sandbox is dispatched and metered as it runs. Each
+  agent session is accountable back to the edge that requested it, so cost is
+  attributable per import, per repo, per tenant.
+- **Integration back into the forge.** The farm does not live in a vacuum: its
+  outputs flow back into **tinytree's code review system and monorepo forge** —
+  imports become reviewable changes, agent-authored tip layers and export PRs
+  carry their provenance trailers into review, and the commit map ties every
+  fleet-produced commit back to the origin and the edge that triggered it.
+
+The invariants hold across the move: the engine stays deterministic, agent output
+stays content-addressed and reproducible, and the commit map remains the
+load-bearing record — the only thing that changes is *where* the work runs and
+*how much* of it can run at once.
+
+---
+
 ## Design invariants
 
 - Import is per-commit along first-parent and history-preserving; it never
