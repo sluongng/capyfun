@@ -1,37 +1,36 @@
 #!/usr/bin/env bash
 #
-# Record the CapyFun import+transform demo to presentation/demo.cast.
+# Record the two CapyFun demos:
+#   presentation/demo-imperative.cast  - structural transforms + tip patch (hermetic)
+#   presentation/demo-generative.cast  - a live agent_transform (needs claude + net)
 #
-# The import runs structural + tip transforms AND a live `agent_transform`, so
-# recording needs a logged-in `claude` CLI and network (the agent call). The
-# resulting .cast is self-contained and plays offline. Requires: asciinema,
-# tmux, tree, watch, claude.
+# The .cast files play offline. Requires: asciinema, tmux, tree, watch
+# (and a logged-in `claude` for the generative one).
 #
-# Usage: presentation/demo/record.sh
+# Usage: presentation/demo/record.sh [imperative|generative|all]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
+WHICH="${1:-all}"
 
 echo "==> building capyfun"
 cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml"
 export CAPYFUN_BIN="$REPO_ROOT/target/debug/capyfun"
 
-OUT="$REPO_ROOT/presentation/demo.cast"
-echo "==> recording -> $OUT"
-# asciicast-v2: the format asciinema-player (used by presentation/demo.html)
-# can load. asciinema 3.x records v3 by default, which the player can't read.
-asciinema rec "$OUT" \
-  --overwrite --headless --window-size 200x48 \
-  --output-format asciicast-v2 \
-  --idle-time-limit 2.5 \
-  --title "CapyFun - import + transform a dependency into the monorepo" \
-  -c "bash '$HERE/drive.sh'"
+record_one() {
+    local mode="$1" out="$REPO_ROOT/presentation/demo-$1.cast"
+    echo "==> recording $mode -> $out"
+    tmux -L capyfundemo kill-server 2>/dev/null || true
+    asciinema rec "$out" \
+        --overwrite --headless --window-size 200x40 \
+        --output-format asciicast-v2 \
+        --idle-time-limit 2.5 \
+        --title "CapyFun - $mode transform" \
+        -c "bash '$HERE/drive.sh' '$mode'"
 
-# Strip tmux's teardown tail (alt-screen exit / clear / "[exited]") emitted when
-# the session is killed, so the recording ends on the clean final frame instead
-# of a blanked/garbled screen. End with a cursor-show for good measure.
-echo "==> trimming teardown tail"
-python3 - "$OUT" <<'PY'
+    # Strip tmux's teardown tail (alt-screen exit / clear / "[exited]") so the
+    # cast ends on the clean final frame instead of a blanked/garbled screen.
+    python3 - "$out" <<'PY'
 import json, sys
 path = sys.argv[1]
 with open(path) as f:
@@ -47,6 +46,13 @@ with open(path, "w") as f:
         f.write(json.dumps(e) + "\n")
 print(f"    kept {len(kept)} events (dropped {len(evs)-cut} teardown)")
 PY
+}
 
-echo "==> done: $OUT"
-echo "    play:  asciinema play '$OUT'"
+case "$WHICH" in
+    imperative) record_one imperative ;;
+    generative) record_one generative ;;
+    all)        record_one imperative; record_one generative ;;
+    *) echo "usage: record.sh [imperative|generative|all]" >&2; exit 2 ;;
+esac
+
+echo "==> done"

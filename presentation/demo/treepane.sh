@@ -1,49 +1,61 @@
 #!/usr/bin/env bash
 #
-# Left-pane view for the asciinema demo: a live snapshot of the monorepo's
-# third_party/widget subtree + the two fields the transforms touch. Run under
+# Left-pane view for an asciinema demo: the declared SRC config, the live
+# third_party/widget tree, and the field(s) the transforms touch. Run under
 # `watch` so it refreshes as the right pane imports/transforms the tree.
 #
-# Colors are built with printf (real ESC bytes) and passed to printf statements,
-# never embedded in a `sed` replacement — sed parses `\033` as `\0`+`33` and
-# would emit a literal "33[32m".
+# Colors are real ESC bytes from printf (never embedded in a `sed` replacement,
+# which would parse `\033` as `\0`+`33` and print a literal "33[32m").
 #
-# Usage: treepane.sh <monorepo-dir>
+# Usage: treepane.sh <monorepo-dir> <imperative|generative>
 MONO="${1:?}"
+MODE="${2:-imperative}"
 cd "$MONO" 2>/dev/null || exit 0
 
 E=$(printf '\033')
-DIM="${E}[2m"; YEL="${E}[1;33m"; CYN="${E}[1;36m"; GRN="${E}[32m"; RED="${E}[31m"; RST="${E}[0m"
-
-emit() { # color, file, pattern: print matching lines, indented and colored
-    local color="$1" file="$2" pat="$3" line
-    while IFS= read -r line; do
-        printf '    %s%s%s\n' "$color" "$line" "$RST"
-    done < <(grep -nE "$pat" "$file")
-}
-
-printf '%s  MONOREPO%s  %sthird_party/widget  (live)%s\n\n' "$YEL" "$RST" "$DIM" "$RST"
-tree -C --noreport third_party/widget 2>/dev/null | sed 's/^/  /'
-
+DIM="${E}[2m"; YEL="${E}[1;33m"; CYN="${E}[1;36m"; GRN="${E}[32m"; RST="${E}[0m"
+SRC=third_party/widget/SRC
 W=third_party/widget/lib/widget.go
-echo
-if [ -f "$W" ]; then
-    printf '  %slib/widget.go — first line (🤖 agent):%s\n' "$CYN" "$RST"
-    printf '    %s%s%s\n' "$GRN" "$(head -1 "$W")" "$RST"
-    printf '  %simport (replace scrubbed):%s\n' "$CYN" "$RST"
-    emit "$GRN" "$W" '^import'
-elif [ -f third_party/widget/pkg/widget.go ]; then
-    printf '  %spkg/widget.go import line:%s\n' "$CYN" "$RST"
-    emit "$RED" third_party/widget/pkg/widget.go '^import'
-else
-    printf '  %slib/widget.go:%s\n' "$CYN" "$RST"
-    printf '    %s(not imported yet)%s\n' "$DIM" "$RST"
+
+# --- the declared config (so viewers always see what drives the run) --------
+printf '%s  //third_party/widget/SRC%s\n' "$YEL" "$RST"
+if [ -f "$SRC" ]; then
+    while IFS= read -r line; do
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        case "$trimmed" in
+            '#'*) printf '  %s%s%s\n' "$DIM" "$line" "$RST" ;;   # comment
+            *)    printf '  %s\n' "$line" ;;
+        esac
+    done < "$SRC"
 fi
 
+# --- the resulting tree -----------------------------------------------------
 echo
-printf '  %sgo.mod toolchain (tip patch):%s\n' "$CYN" "$RST"
-if [ -f third_party/widget/go.mod ]; then
-    emit "$GRN" third_party/widget/go.mod 'toolchain|^go '
+printf '%s  third_party/widget%s  %s(live)%s\n' "$YEL" "$RST" "$DIM" "$RST"
+tree -C --noreport third_party/widget 2>/dev/null | sed 's/^/  /'
+
+# --- what the transforms produced ------------------------------------------
+echo
+if [ "$MODE" = generative ]; then
+    printf '  %slib/widget.go — first line (🤖 agent):%s\n' "$CYN" "$RST"
+    if [ -f "$W" ]; then
+        printf '    %s%s%s\n' "$GRN" "$(head -1 "$W")" "$RST"
+    else
+        printf '    %s(not imported yet)%s\n' "$DIM" "$RST"
+    fi
 else
-    printf '    %s(not imported yet)%s\n' "$DIM" "$RST"
+    printf '  %slib/widget.go import (scrubbed):%s\n' "$CYN" "$RST"
+    if [ -f "$W" ]; then
+        while IFS= read -r line; do printf '    %s%s%s\n' "$GRN" "$line" "$RST"; done \
+            < <(grep -n '^import' "$W")
+    else
+        printf '    %s(not imported yet)%s\n' "$DIM" "$RST"
+    fi
+    printf '  %sgo.mod toolchain (tip patch):%s\n' "$CYN" "$RST"
+    if [ -f third_party/widget/go.mod ]; then
+        while IFS= read -r line; do printf '    %s%s%s\n' "$GRN" "$line" "$RST"; done \
+            < <(grep -nE 'toolchain|^go ' third_party/widget/go.mod)
+    else
+        printf '    %s(not imported yet)%s\n' "$DIM" "$RST"
+    fi
 fi

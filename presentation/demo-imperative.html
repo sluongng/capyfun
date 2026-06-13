@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CapyFun — imperative transforms</title>
+<link rel="stylesheet" href="vendor/asciinema-player.css" />
+<style>
+  :root{
+    --bg:#0c1117; --bg2:#0f1722; --fg:#e7edf3; --muted:#94a3b2;
+    --accent:#ffb454; --accent2:#5ccfe6;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(92,207,230,.10), transparent 60%),
+      radial-gradient(1000px 600px at 0% 110%, rgba(255,180,84,.10), transparent 55%),
+      linear-gradient(180deg,var(--bg),var(--bg2));
+    color:var(--fg); font-family:var(--sans);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    min-height:100vh; gap:1.6vh; padding:2.5vh 2vw;
+  }
+  .nav{display:flex; gap:10px; align-items:center; font-size:14px}
+  .nav a{color:var(--muted); text-decoration:none; padding:.35em 1em; border:1px solid var(--line,rgba(255,255,255,.12)); border-radius:999px}
+  .nav a:hover{color:var(--fg)}
+  .nav a.on{color:var(--accent); border-color:rgba(255,180,84,.5); background:rgba(255,180,84,.12); font-weight:700}
+  .nav .slides{border:none}
+  h1{font-size:clamp(20px,2.8vw,34px); font-weight:800; letter-spacing:-.02em; text-align:center}
+  h1 .em{color:var(--accent)}
+  #player{width:min(1600px,97vw); height:70vh}
+  .controls{display:flex; gap:14px}
+  button{background:rgba(255,180,84,.14); color:var(--accent); border:1px solid rgba(255,180,84,.4);
+    border-radius:999px; padding:.45em 1.3em; font:inherit; font-weight:700; cursor:pointer}
+  button:hover{background:rgba(255,180,84,.24)}
+  .legend{color:var(--muted); font-size:15px; text-align:center; max-width:90ch; line-height:1.5}
+  .legend b{color:var(--fg)} .i{color:var(--accent2)} .o{color:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="nav">
+    <a class="slides" href="index.html">‹ slides</a>
+    <a class="on" href="demo-imperative.html">Imperative</a>
+    <a href="demo-generative.html">Generative 🤖</a>
+  </div>
+  <h1>Imperative transforms — <span class="em">deterministic</span> rewrites</h1>
+  <div id="player"></div>
+  <div class="controls">
+    <button id="replay">↻ Replay</button>
+    <button id="full">⤢ Fullscreen</button>
+  </div>
+  <p class="legend">
+    <b>Left:</b> the <code>SRC</code> config + the live tree. <b>Right:</b> the commands.
+    <span class="i">replace</span> scrubs <code>acme.internal/</code>, <span class="i">move</span> relocates
+    <code>pkg/→lib/</code>, <span class="i">apply_patch</span> pins <code>go.mod</code> —
+    every commit carries <span class="o">CapyFun-Origin</span>.
+  </p>
+<script src="vendor/asciinema-player.min.js"></script>
+<script>
+  const CAST='demo-imperative.cast';
+  const el=document.getElementById('player');
+  const opts={autoPlay:true, preload:true, idleTimeLimit:2, theme:'asciinema', fit:'both'};
+  let p=AsciinemaPlayer.create(CAST, el, opts);
+  document.getElementById('replay').onclick=()=>{ p.dispose(); p=AsciinemaPlayer.create(CAST, el, opts); };
+  document.getElementById('full').onclick=()=>{ if(!document.fullscreenElement) el.requestFullscreen(); else document.exitFullscreen(); };
+</script>
+</body>
+</html>

@@ -3,12 +3,11 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>CapyFun — demo</title>
-<link rel="stylesheet" href="vendor/asciinema-player.css" />
+<title>CapyFun — demos</title>
 <style>
   :root{
     --bg:#0c1117; --bg2:#0f1722; --fg:#e7edf3; --muted:#94a3b2;
-    --accent:#ffb454; --accent2:#5ccfe6;
+    --accent:#ffb454; --accent2:#5ccfe6; --line:rgba(255,255,255,.12);
     --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   }
   *{box-sizing:border-box;margin:0;padding:0}
@@ -20,49 +19,41 @@
       linear-gradient(180deg,var(--bg),var(--bg2));
     color:var(--fg); font-family:var(--sans);
     display:flex; flex-direction:column; align-items:center; justify-content:center;
-    min-height:100vh; gap:2.5vh; padding:4vh 3vw;
+    min-height:100vh; gap:4vh; padding:5vh 4vw;
   }
-  .kicker{color:var(--accent); font-weight:700; letter-spacing:.16em; text-transform:uppercase; font-size:14px}
-  h1{font-size:clamp(24px,3.4vw,40px); font-weight:800; letter-spacing:-.02em; text-align:center}
-  h1 .em{color:var(--accent)}
-  #player{width:min(1400px,96vw); box-shadow:0 24px 80px rgba(0,0,0,.5); border-radius:12px; overflow:hidden}
-  .ap-terminal{font-size:15px}
-  .controls{display:flex; gap:14px; align-items:center}
-  button{
-    background:rgba(255,180,84,.14); color:var(--accent);
-    border:1px solid rgba(255,180,84,.4); border-radius:999px;
-    padding:.5em 1.4em; font:inherit; font-weight:700; cursor:pointer;
-  }
-  button:hover{background:rgba(255,180,84,.24)}
-  .legend{color:var(--muted); font-size:15px; text-align:center; max-width:80ch; line-height:1.5}
-  .legend b{color:var(--fg)} .o{color:var(--accent)} .i{color:var(--accent2)}
-  a.back{position:fixed; top:16px; left:18px; color:var(--muted); text-decoration:none; font-size:14px}
-  a.back:hover{color:var(--accent)}
+  .kicker{color:var(--accent); font-weight:700; letter-spacing:.16em; text-transform:uppercase; font-size:13px}
+  h1{font-size:clamp(26px,4vw,48px); font-weight:800; letter-spacing:-.02em; text-align:center}
+  .cards{display:grid; grid-template-columns:1fr 1fr; gap:3vw; max-width:1000px; width:100%}
+  a.card{display:block; text-decoration:none; color:var(--fg);
+    background:rgba(255,255,255,.045); border:1px solid var(--line); border-radius:18px;
+    padding:3.5vh 2.4vw; transition:.15s}
+  a.card:hover{border-color:rgba(255,180,84,.5); background:rgba(255,180,84,.08); transform:translateY(-3px)}
+  .card .t{font-size:clamp(20px,2.4vw,30px); font-weight:800; margin-bottom:1vh}
+  .card .d{color:var(--muted); font-size:clamp(14px,1.5vw,19px); line-height:1.5}
+  .card .go{margin-top:2vh; color:var(--accent); font-weight:700}
+  .back{position:fixed; top:16px; left:18px; color:var(--muted); text-decoration:none; font-size:14px}
+  .back:hover{color:var(--accent)}
 </style>
 </head>
 <body>
   <a class="back" href="index.html">‹ slides</a>
-  <div class="kicker">Demo · plays offline · ~65s</div>
-  <h1>Import &amp; <span class="em">transform</span> a dependency into the monorepo</h1>
-  <div id="player"></div>
-  <div class="controls">
-    <button id="replay">↻ Replay</button>
-    <button id="full">⤢ Fullscreen</button>
+  <div class="kicker">CapyFun · demos</div>
+  <h1>Two transformations, two demos</h1>
+  <div class="cards">
+    <a class="card" href="demo-imperative.html">
+      <div class="t">Imperative</div>
+      <div class="d">Deterministic, structural rewrites: <b style="color:var(--accent2)">replace</b> scrubs
+        internal refs, <b style="color:var(--accent2)">move</b> relocates the tree,
+        <b style="color:var(--accent2)">apply_patch</b> pins a version. Hermetic.</div>
+      <div class="go">▶ play →</div>
+    </a>
+    <a class="card" href="demo-generative.html">
+      <div class="t">Generative 🤖</div>
+      <div class="d">A coding <b style="color:var(--accent2)">agent</b> modernizes the landed code —
+        composed as <code>harness × model</code>, output materialized to a content-addressed,
+        reproducible patch.</div>
+      <div class="go">▶ play →</div>
+    </a>
   </div>
-  <p class="legend">
-    Left: the live <b>third_party/widget</b> tree. Right: the commands.
-    Watch <span class="i">pkg/ → lib/</span>, <span class="i">acme.internal/ scrubbed</span>,
-    <span class="i">go.mod pinned</span>, then a <span class="o">🤖 generative agent</span> adds a header —
-    and <span class="o">CapyFun-Origin</span> + <span class="o">CapyFun-Agent</span> on every commit.
-  </p>
-
-<script src="vendor/asciinema-player.min.js"></script>
-<script>
-  const el=document.getElementById('player');
-  const opts={ cols:200, rows:48, autoPlay:true, preload:true, idleTimeLimit:2, theme:'asciinema', fit:'width', terminalFontSize:'14px' };
-  let player=AsciinemaPlayer.create('demo.cast', el, opts);
-  document.getElementById('replay').onclick=()=>{ player.dispose(); player=AsciinemaPlayer.create('demo.cast', el, opts); };
-  document.getElementById('full').onclick=()=>{ if(!document.fullscreenElement) el.requestFullscreen(); else document.exitFullscreen(); };
-</script>
 </body>
 </html>
