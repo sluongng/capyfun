@@ -7,13 +7,19 @@ affected targets. It builds on the import/vendor/export engine and the commit ma
 Read `../../CLAUDE.md` first. This is a design/roadmap artifact; the buildable
 first slice (the poll reconciler) is spec'd concretely at the end.
 
-> **Status:** `capyfun serve` implements the event *plumbing*: it builds the
-> per-monorepo `repo → targets` index from the IR, polls GH Archive on a schedule
-> (`--once` for a single cycle), and hosts the HTTP endpoint (`GET /healthz`,
-> `POST /webhook`) that parses GitHub push payloads into the same trigger model.
-> Today a matched event is *reported* as a [`Trigger`]; **acting** on it
-> (`capyfun reconcile` — fetch, import/vendor, open a PR) and webhook **HMAC
-> verification** are the next steps.
+> **Status:** the reconciler is implemented. `capyfun status [//target]` is the
+> dry-run desired-vs-actual report (per target: `up to date` / `N commits behind`
+> / `pin changed` / `uninitialized`), and `capyfun reconcile [//target]` runs the
+> idempotent import/vendor/export needed to converge — both built on the engine
+> commit map, both covered by `tests/reconcile_test.rs` against local origins.
+> `capyfun serve` implements the event *plumbing*: it builds the per-monorepo
+> `repo → targets` index from the IR, polls GH Archive on a schedule (`--once` for
+> a single cycle), and hosts the HTTP endpoint (`GET /healthz`, `POST /webhook`)
+> that parses GitHub push payloads into the same trigger model. Today a matched
+> event is *reported* as a [`Trigger`]; **wiring `serve` to call `reconcile` on a
+> trigger**, webhook **HMAC verification**, and **pin-bump PRs** (proposing a new
+> upstream pin on a release, vs. reconciling to the declared pin) are the next
+> steps.
 
 ## Thesis: level-triggered, events are hints
 
@@ -87,10 +93,13 @@ For each affected target:
    snapshot / open a pin-bump PR / refresh an export PR. No diff → no-op.
 
 Re-runs are safe (idempotent), so jobs can be retried and events can be
-at-least-once. Two CLI surfaces fall out:
+at-least-once. Two CLI surfaces fall out (both **implemented**):
 
 - **`capyfun status`** — dry-run reconcile: per target, "up to date / N commits
-  behind / pin bump vN available." No infra, useful standalone.
+  behind / pin changed / uninitialized." No infra, useful standalone. (A "pin
+  bump vN available" check — newer upstream *tag* than the declared pin — is the
+  remaining pin-bump-PR piece; status today compares the declared pin, not the
+  latest release.)
 - **`capyfun reconcile [//target]`** — perform the import/vendor/export and emit
   the output below.
 
