@@ -19,6 +19,7 @@ pub mod gomod;
 pub mod ir;
 pub mod npm;
 pub mod reconcile;
+pub mod remote;
 pub mod server;
 pub mod status;
 pub mod transform;
