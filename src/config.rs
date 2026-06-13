@@ -42,6 +42,14 @@ pub enum Decl {
     Export(ExportDecl),
     #[serde(rename = "git_repository")]
     GitRepo(GitRepoDecl),
+    #[serde(rename = "harness")]
+    Harness(HarnessDecl),
+    #[serde(rename = "model")]
+    Model(ModelDecl),
+    #[serde(rename = "agent")]
+    Agent(AgentDecl),
+    #[serde(rename = "prompt_template")]
+    PromptTemplate(PromptTemplateDecl),
 }
 
 impl Decl {
@@ -52,6 +60,10 @@ impl Decl {
             Decl::Import(_) => "github_import",
             Decl::Export(_) => "github_export",
             Decl::GitRepo(_) => "git_repository",
+            Decl::Harness(_) => "harness",
+            Decl::Model(_) => "model",
+            Decl::Agent(_) => "agent",
+            Decl::PromptTemplate(_) => "prompt_template",
         }
     }
 
@@ -62,6 +74,10 @@ impl Decl {
             Decl::Import(d) => &d.package,
             Decl::Export(d) => &d.package,
             Decl::GitRepo(d) => &d.package,
+            Decl::Harness(d) => &d.package,
+            Decl::Model(d) => &d.package,
+            Decl::Agent(d) => &d.package,
+            Decl::PromptTemplate(d) => &d.package,
         }
     }
 }
@@ -110,6 +126,53 @@ pub struct GitRepoDecl {
     pub commit: String,
     /// Optional subpath within the declaring package; `None` means the package.
     pub into: Option<String>,
+    pub package: String,
+}
+
+/// An agent harness runtime (`harness`), carrying its `plugins`/`skills` as
+/// runfiles (references to `git_repository` targets by label).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HarnessDecl {
+    pub name: String,
+    /// Harness runtime kind, e.g. `claude_code` / `codex` / `antigravity` / `pi`.
+    pub kind: String,
+    /// Labels of `git_repository` plugin targets to bring in as runfiles.
+    pub plugins: Vec<String>,
+    /// Labels of `git_repository` skill targets to bring in as runfiles.
+    pub skills: Vec<String>,
+    pub package: String,
+}
+
+/// An LLM (`model`): a provider + id, plus an optional credential *reference*.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelDecl {
+    pub name: String,
+    /// Provider, e.g. `anthropic` / `openai` / `google` / `nebius`.
+    pub provider: String,
+    /// Provider-specific model id.
+    pub id: String,
+    /// Optional credential reference (e.g. `env:NAME`); never a secret value.
+    pub credential: Option<String>,
+    pub package: String,
+}
+
+/// An agent (`agent`): pairs a `harness` with a `model`, both by label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentDecl {
+    pub name: String,
+    /// Label of the `harness` rule this agent runs on.
+    pub harness: String,
+    /// Label of the `model` rule this agent drives.
+    pub model: String,
+    pub package: String,
+}
+
+/// A prompt template (`prompt_template`): wraps a `.tmpl` file by label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromptTemplateDecl {
+    pub name: String,
+    /// `.tmpl` file path relative to the declaring SRC package.
+    pub src: String,
     pub package: String,
 }
 
@@ -226,6 +289,82 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
             from_path,
             repo,
             branch: branch.to_owned(),
+            package,
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// Declare an agent harness runtime. `kind` selects the runtime; `plugins`
+    /// and `skills` are labels of `git_repository` targets brought in as runfiles.
+    fn harness(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] kind: String,
+        #[starlark(require = named, default = UnpackList::default())] plugins: UnpackList<String>,
+        #[starlark(require = named, default = UnpackList::default())] skills: UnpackList<String>,
+        eval: &mut Evaluator,
+    ) -> anyhow::Result<NoneType> {
+        let s = state(eval)?;
+        let package = s.package.clone();
+        s.record(Decl::Harness(HarnessDecl {
+            name,
+            kind,
+            plugins: plugins.items,
+            skills: skills.items,
+            package,
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// Declare an LLM. `credential` is an optional `env:NAME` reference (never a
+    /// secret value); with none, the provider's conventional env var is used.
+    fn model(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] provider: String,
+        #[starlark(require = named)] id: String,
+        #[starlark(require = named)] credential: Option<String>,
+        eval: &mut Evaluator,
+    ) -> anyhow::Result<NoneType> {
+        let s = state(eval)?;
+        let package = s.package.clone();
+        s.record(Decl::Model(ModelDecl {
+            name,
+            provider,
+            id,
+            credential,
+            package,
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// Declare an agent pairing a `harness` and a `model`, both by label.
+    fn agent(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] harness: String,
+        #[starlark(require = named)] model: String,
+        eval: &mut Evaluator,
+    ) -> anyhow::Result<NoneType> {
+        let s = state(eval)?;
+        let package = s.package.clone();
+        s.record(Decl::Agent(AgentDecl {
+            name,
+            harness,
+            model,
+            package,
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// Declare a prompt template wrapping a `.tmpl` file (relative to the package).
+    fn prompt_template(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] src: String,
+        eval: &mut Evaluator,
+    ) -> anyhow::Result<NoneType> {
+        let s = state(eval)?;
+        let package = s.package.clone();
+        s.record(Decl::PromptTemplate(PromptTemplateDecl {
+            name,
+            src,
             package,
         }))?;
         Ok(NoneType)

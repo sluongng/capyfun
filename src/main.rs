@@ -509,6 +509,35 @@ fn run_config(args: ConfigArgs) -> Result<()> {
                     g.package, g.name, g.repo, g.commit, into
                 );
             }
+            capyfun::config::Decl::Harness(h) => {
+                println!(
+                    "{}:{}  harness kind={} plugins={} skills={}",
+                    h.package,
+                    h.name,
+                    h.kind,
+                    h.plugins.len(),
+                    h.skills.len()
+                );
+            }
+            capyfun::config::Decl::Model(m) => {
+                let cred = m.credential.as_deref().unwrap_or("<default>");
+                println!(
+                    "{}:{}  model provider={} id={} credential={}",
+                    m.package, m.name, m.provider, m.id, cred
+                );
+            }
+            capyfun::config::Decl::Agent(a) => {
+                println!(
+                    "{}:{}  agent harness={} model={}",
+                    a.package, a.name, a.harness, a.model
+                );
+            }
+            capyfun::config::Decl::PromptTemplate(p) => {
+                println!(
+                    "{}:{}  prompt_template src={}",
+                    p.package, p.name, p.src
+                );
+            }
         }
     }
     Ok(())

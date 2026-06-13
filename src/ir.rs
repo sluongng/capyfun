@@ -17,6 +17,10 @@ pub struct Ir {
     pub imports: Vec<Import>,
     pub vendors: Vec<Vendor>,
     pub exports: Vec<Export>,
+    pub harnesses: Vec<Harness>,
+    pub models: Vec<Model>,
+    pub agents: Vec<Agent>,
+    pub prompt_templates: Vec<PromptTemplate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -64,6 +68,60 @@ pub struct Export {
     pub branch: String,
     /// Monorepo-root-relative source directory to export.
     pub from: String,
+}
+
+/// An agent harness runtime (`harness`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Harness {
+    /// Bazel-style label, e.g. `//tools/harness:claude_code`.
+    pub label: String,
+    pub name: String,
+    pub package: String,
+    /// Harness runtime kind (validated against [`crate::agent::HarnessKind`]).
+    pub kind: String,
+    /// Labels of `git_repository` plugin targets brought in as runfiles.
+    pub plugins: Vec<String>,
+    /// Labels of `git_repository` skill targets brought in as runfiles.
+    pub skills: Vec<String>,
+}
+
+/// An LLM (`model`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Model {
+    /// Bazel-style label, e.g. `//tools/models:opus`.
+    pub label: String,
+    pub name: String,
+    pub package: String,
+    /// Provider, e.g. `anthropic` / `openai` / `google` / `nebius`.
+    pub provider: String,
+    /// Provider-specific model id.
+    pub id: String,
+    /// Optional credential reference (e.g. `env:NAME`); never a secret value.
+    pub credential: Option<String>,
+}
+
+/// An agent (`agent`): a resolved `harness` + `model` pairing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Agent {
+    /// Bazel-style label, e.g. `//tools/agent:reviewer`.
+    pub label: String,
+    pub name: String,
+    pub package: String,
+    /// Resolved label of the `harness` rule this agent runs on.
+    pub harness: String,
+    /// Resolved label of the `model` rule this agent drives.
+    pub model: String,
+}
+
+/// A prompt template (`prompt_template`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromptTemplate {
+    /// Bazel-style label, e.g. `//tools/agent/prompts:review`.
+    pub label: String,
+    pub name: String,
+    pub package: String,
+    /// Monorepo-root-relative `.tmpl` path (resolved against the SRC package).
+    pub src: String,
 }
 
 /// The monorepo-root-relative directory for a package label (`//` -> "").
@@ -124,10 +182,16 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
         }
     };
 
-    // --- lower imports/vendors/exports ---
+    // --- lower imports/vendors/exports + agent tool rules ---
     let mut imports = Vec::new();
     let mut vendors = Vec::new();
     let mut exports = Vec::new();
+    let mut harnesses = Vec::new();
+    let mut models = Vec::new();
+    let mut prompt_templates = Vec::new();
+    // Agents are lowered in a second pass: resolving `harness`/`model` labels
+    // needs the harnesses/models above to be lowered first.
+    let mut agent_decls = Vec::new();
     for decl in &raw.decls {
         match decl {
             Decl::Monorepo(_) => {}
@@ -213,7 +277,113 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                     from,
                 });
             }
+            Decl::Harness(d) => {
+                let label = format!("{}:{}", d.package, d.name);
+                if let Err(e) = crate::agent::HarnessKind::parse(&d.kind) {
+                    errors.push(format!("{label}: {e}"));
+                }
+                harnesses.push(Harness {
+                    label,
+                    name: d.name.clone(),
+                    package: d.package.clone(),
+                    kind: d.kind.clone(),
+                    plugins: d.plugins.clone(),
+                    skills: d.skills.clone(),
+                });
+            }
+            Decl::Model(d) => {
+                let label = format!("{}:{}", d.package, d.name);
+                if !crate::agent::is_known_provider(&d.provider) {
+                    errors.push(format!(
+                        "{label}: provider `{}` is unknown (known: {})",
+                        d.provider,
+                        crate::agent::KNOWN_PROVIDERS.join(", ")
+                    ));
+                }
+                if d.id.is_empty() {
+                    errors.push(format!("{label}: model id is empty"));
+                }
+                // Validate the credential *reference shape* only (e.g. `env:NAME`);
+                // whether the variable is set is an execution-time concern.
+                if let Some(reference) = &d.credential {
+                    if let Err(e) =
+                        crate::agent::credential_var(&d.provider, Some(reference.as_str()))
+                    {
+                        errors.push(format!("{label}: {e}"));
+                    }
+                }
+                models.push(Model {
+                    label,
+                    name: d.name.clone(),
+                    package: d.package.clone(),
+                    provider: d.provider.clone(),
+                    id: d.id.clone(),
+                    credential: d.credential.clone(),
+                });
+            }
+            Decl::PromptTemplate(d) => {
+                let label = format!("{}:{}", d.package, d.name);
+                // Config evaluation is pure (no I/O): validate the path *shape*
+                // only (relative, no `..`). Actual file existence is an
+                // execution-time check, deferred to the engine.
+                validate::check_rel_path(&label, "src", &d.src, &mut errors);
+                let dir = package_dir(&d.package);
+                let src = join_dir(dir, Some(&d.src));
+                prompt_templates.push(PromptTemplate {
+                    label,
+                    name: d.name.clone(),
+                    package: d.package.clone(),
+                    src,
+                });
+            }
+            Decl::Agent(d) => agent_decls.push(d),
         }
+    }
+
+    // --- second pass: resolve agent harness/model labels ---
+    let mut agents = Vec::new();
+    for d in agent_decls {
+        let label = format!("{}:{}", d.package, d.name);
+        let harness = resolve_label(
+            &label,
+            "harness",
+            &d.harness,
+            harnesses.iter().map(|h| h.label.as_str()),
+            &mut errors,
+        );
+        let model = resolve_label(
+            &label,
+            "model",
+            &d.model,
+            models.iter().map(|m| m.label.as_str()),
+            &mut errors,
+        );
+        // If both resolved, check the harness can drive the model's provider.
+        if let (Some(h_label), Some(m_label)) = (&harness, &model) {
+            let h = harnesses
+                .iter()
+                .find(|h| &h.label == h_label)
+                .expect("resolved harness label exists");
+            let m = models
+                .iter()
+                .find(|m| &m.label == m_label)
+                .expect("resolved model label exists");
+            if let Ok(kind) = crate::agent::HarnessKind::parse(&h.kind) {
+                if !kind.can_drive(&m.provider) {
+                    errors.push(format!(
+                        "{label}: harness `{}` (kind {}) cannot drive model `{}` (provider {})",
+                        h.label, h.kind, m.label, m.provider
+                    ));
+                }
+            }
+        }
+        agents.push(Agent {
+            label,
+            name: d.name.clone(),
+            package: d.package.clone(),
+            harness: harness.unwrap_or_else(|| d.harness.clone()),
+            model: model.unwrap_or_else(|| d.model.clone()),
+        });
     }
 
     // --- cross-rule checks ---
@@ -231,6 +401,26 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
             exports
                 .iter()
                 .map(|e| (e.package.as_str(), e.name.as_str(), e.label.as_str())),
+        )
+        .chain(
+            harnesses
+                .iter()
+                .map(|h| (h.package.as_str(), h.name.as_str(), h.label.as_str())),
+        )
+        .chain(
+            models
+                .iter()
+                .map(|m| (m.package.as_str(), m.name.as_str(), m.label.as_str())),
+        )
+        .chain(
+            agents
+                .iter()
+                .map(|a| (a.package.as_str(), a.name.as_str(), a.label.as_str())),
+        )
+        .chain(
+            prompt_templates
+                .iter()
+                .map(|p| (p.package.as_str(), p.name.as_str(), p.label.as_str())),
         )
         .collect();
     check_unique_names(&names, &mut errors);
@@ -253,7 +443,33 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
         imports,
         vendors,
         exports,
+        harnesses,
+        models,
+        agents,
+        prompt_templates,
     })
+}
+
+/// Resolve a Bazel-style label `target` (e.g. `//tools/harness:claude_code`)
+/// against the set of `candidates` labels of the expected `kind` (`harness` /
+/// `model`). Returns the matched label on success; on failure, pushes a clear
+/// diagnostic prefixed with the referencing rule's `label` and returns `None`.
+fn resolve_label<'a>(
+    label: &str,
+    kind: &str,
+    target: &str,
+    candidates: impl Iterator<Item = &'a str>,
+    errors: &mut Vec<String>,
+) -> Option<String> {
+    for cand in candidates {
+        if cand == target {
+            return Some(cand.to_owned());
+        }
+    }
+    errors.push(format!(
+        "{label}: {kind} label `{target}` does not resolve to a {kind} rule"
+    ));
+    None
 }
 
 /// Names must be unique per package across all rule kinds. `entries` are

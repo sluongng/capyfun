@@ -1,0 +1,2 @@
+model(name = "opus", provider = "anthropic", id = "claude-opus-4-8")
+model(name = "gpt", provider = "openai", id = "gpt-5.5", credential = "env:OPENAI_API_KEY")

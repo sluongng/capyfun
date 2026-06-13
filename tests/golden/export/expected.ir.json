@@ -14,5 +14,9 @@
       "branch": "main",
       "from": "sdk/go/client"
     }
-  ]
+  ],
+  "harnesses": [],
+  "models": [],
+  "agents": [],
+  "prompt_templates": []
 }

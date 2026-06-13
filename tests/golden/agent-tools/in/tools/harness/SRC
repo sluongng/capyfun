@@ -1,0 +1,2 @@
+harness(name = "claude_code", kind = "claude_code", plugins = ["//tools/plugins:bazel"])
+harness(name = "codex", kind = "codex")

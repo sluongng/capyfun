@@ -1,0 +1,1 @@
+harness(name = "claude_code", kind = "claude_code")

@@ -23,6 +23,10 @@ fn ir_with_uuid_import() -> Ir {
         }],
         vendors: vec![],
         exports: vec![],
+        harnesses: vec![],
+        models: vec![],
+        agents: vec![],
+        prompt_templates: vec![],
     }
 }
 

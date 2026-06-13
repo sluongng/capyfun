@@ -15,5 +15,9 @@
     }
   ],
   "vendors": [],
-  "exports": []
+  "exports": [],
+  "harnesses": [],
+  "models": [],
+  "agents": [],
+  "prompt_templates": []
 }
