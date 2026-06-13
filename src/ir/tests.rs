@@ -1,7 +1,8 @@
 //! Tests for lowering + validation.
 
 use super::*;
-use crate::config::{ExportDecl, GitRepoDecl, ImportDecl, MonorepoDecl};
+use crate::config::{ExportDecl, GitRepoDecl, ImportDecl, MonorepoDecl, TransformSpec};
+use crate::transform::{Phase, Transform};
 
 const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -30,6 +31,7 @@ fn import(package: &str, name: &str) -> ImportDecl {
         git_ref: "refs/heads/main".into(),
         into: None,
         patches: vec![],
+        transforms: vec![],
         package: package.into(),
     }
 }
@@ -212,4 +214,80 @@ fn errors_are_sorted_and_deduped() {
     let mut sorted = errs.clone();
     sorted.sort();
     assert_eq!(errs, sorted);
+}
+
+// --- transforms ---
+
+#[test]
+fn lowers_transforms_and_groups_by_phase() {
+    let mut imp = import("//third_party/x", "x");
+    // A tip-like ordering check would need a tip transform; all of ours are
+    // mirror-phase, so assert order is preserved and all are mirror.
+    imp.transforms = vec![
+        TransformSpec::Replace {
+            before: "a".into(),
+            after: "b".into(),
+            paths: vec!["**/*.go".into()],
+            regex: false,
+        },
+        TransformSpec::Move {
+            src: "pkg".into(),
+            dst: "lib".into(),
+        },
+        TransformSpec::RewriteMessage {
+            before: None,
+            after: None,
+            regex: false,
+            strip_trailers: vec!["Internal-Review".into()],
+            add_trailers: vec![],
+        },
+    ];
+    let ir = compile_decls(vec![mono("//"), Decl::Import(imp)]).unwrap();
+    let ts = &ir.imports[0].transforms;
+    assert_eq!(ts.len(), 3);
+    assert!(ts.iter().all(|t| t.phase() == Phase::Mirror));
+    assert!(matches!(ts[0], Transform::Replace { .. }));
+    assert!(matches!(ts[1], Transform::Move { .. }));
+    assert!(matches!(ts[2], Transform::RewriteMessage { .. }));
+}
+
+#[test]
+fn transform_path_escape_errors() {
+    let mut imp = import("//svc", "a");
+    imp.transforms = vec![TransformSpec::Move {
+        src: "../escape".into(),
+        dst: "ok".into(),
+    }];
+    let errs = compile_decls(vec![mono("//"), Decl::Import(imp)]).unwrap_err();
+    assert!(errs.iter().any(|e| e.contains("move src")), "{errs:?}");
+}
+
+#[test]
+fn replace_glob_escape_errors() {
+    let mut imp = import("//svc", "a");
+    imp.transforms = vec![TransformSpec::Replace {
+        before: "a".into(),
+        after: "b".into(),
+        paths: vec!["../*.go".into()],
+        regex: false,
+    }];
+    let errs = compile_decls(vec![mono("//"), Decl::Import(imp)]).unwrap_err();
+    assert!(errs.iter().any(|e| e.contains("replace paths")), "{errs:?}");
+}
+
+#[test]
+fn rewrite_message_requires_before_and_after_together() {
+    let mut imp = import("//svc", "a");
+    imp.transforms = vec![TransformSpec::RewriteMessage {
+        before: Some("x".into()),
+        after: None,
+        regex: false,
+        strip_trailers: vec![],
+        add_trailers: vec![],
+    }];
+    let errs = compile_decls(vec![mono("//"), Decl::Import(imp)]).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("before` and `after")),
+        "{errs:?}"
+    );
 }

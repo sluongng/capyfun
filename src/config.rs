@@ -19,16 +19,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use allocative::Allocative;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::{FrozenModule, Globals, GlobalsBuilder, Module};
 use starlark::eval::{Evaluator, FileLoader};
-use starlark::starlark_module;
 use starlark::syntax::{AstModule, Dialect};
 use starlark::values::list::UnpackList;
 use starlark::values::none::NoneType;
-use starlark::values::FrozenHeapName;
+use starlark::values::{starlark_value, NoSerialize, StarlarkValue, Value, ValueLike};
+use starlark::values::{FrozenHeapName, Heap};
+use starlark::{starlark_module, starlark_simple_value};
 
 /// A single captured rule instantiation, attributed to its declaring package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -86,6 +88,11 @@ pub struct ImportDecl {
     pub into: Option<String>,
     /// Ordered patch files, relative to the declaring SRC file.
     pub patches: Vec<String>,
+    /// Ordered transform pipeline (from `transforms = [...]`), in source order.
+    /// Empty when none are declared, so existing configs serialize unchanged at
+    /// the IR boundary (the field is `#[serde(default)]` on the way back in).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<TransformSpec>,
     pub package: String,
 }
 
@@ -111,6 +118,98 @@ pub struct GitRepoDecl {
     /// Optional subpath within the declaring package; `None` means the package.
     pub into: Option<String>,
     pub package: String,
+}
+
+/// A captured transform from a `transforms = [...]` list, in its raw (pre-IR)
+/// form: paths/text exactly as written, before package-anchoring or static
+/// validation (those happen in [`crate::ir`], producing
+/// [`crate::transform::Transform`]).
+///
+/// This is the closed, typed vocabulary of imperative transforms. The generative
+/// `agent_transform` is added by a separate integration as a new variant here
+/// (carrying its label/prompt fields); the lowering in [`crate::ir`] maps each
+/// variant to a [`crate::transform::Transform`], so grafting it on is mechanical.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "transform", rename_all = "snake_case")]
+pub enum TransformSpec {
+    Replace {
+        before: String,
+        after: String,
+        paths: Vec<String>,
+        regex: bool,
+    },
+    Move {
+        src: String,
+        dst: String,
+    },
+    Copy {
+        src: String,
+        dst: String,
+    },
+    RewriteMessage {
+        before: Option<String>,
+        after: Option<String>,
+        regex: bool,
+        strip_trailers: Vec<String>,
+        add_trailers: Vec<String>,
+    },
+}
+
+impl TransformSpec {
+    /// Human-readable constructor name, for diagnostics.
+    fn kind(&self) -> &'static str {
+        match self {
+            TransformSpec::Replace { .. } => "replace",
+            TransformSpec::Move { .. } => "move",
+            TransformSpec::Copy { .. } => "copy",
+            TransformSpec::RewriteMessage { .. } => "rewrite_message",
+        }
+    }
+}
+
+/// A heap-allocated Starlark value carrying a [`TransformSpec`].
+///
+/// Transform constructors (`replace`, `move`, …) return one of these. It is a
+/// "simple" value: it holds only owned `'static` data, so it is identical frozen
+/// or unfrozen and survives `freeze()` unchanged — which is why a transform
+/// constant may be defined in a `.scl` library and `load()`ed into an SRC file.
+#[derive(Debug, Clone, PartialEq, Eq, ProvidesStaticType, NoSerialize, Allocative)]
+pub struct TransformValue {
+    #[allocative(skip)]
+    spec: TransformSpec,
+}
+
+impl std::fmt::Display for TransformValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<transform {}>", self.spec.kind())
+    }
+}
+
+starlark_simple_value!(TransformValue);
+
+#[starlark_value(type = "transform")]
+impl<'v> StarlarkValue<'v> for TransformValue {}
+
+impl TransformValue {
+    fn new(spec: TransformSpec) -> Self {
+        TransformValue { spec }
+    }
+
+    /// Pull a [`TransformSpec`] out of a Starlark value, erroring if it is not a
+    /// transform (so `transforms = [replace(...), "oops"]` is rejected with a
+    /// clear message at evaluation time).
+    fn unpack(value: Value, index: usize) -> Result<TransformSpec> {
+        value
+            .downcast_ref::<TransformValue>()
+            .map(|t| t.spec.clone())
+            .with_context(|| {
+                format!(
+                    "transforms[{index}] is `{}`, not a transform; \
+                     use replace/move/copy/rewrite_message",
+                    value.get_type()
+                )
+            })
+    }
 }
 
 /// The captured result of evaluating every SRC file under a monorepo root.
@@ -176,16 +275,24 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
         #[starlark(require = named, default = "refs/heads/main")] r#ref: &str,
         #[starlark(require = named)] into: Option<String>,
         #[starlark(require = named, default = UnpackList::default())] patches: UnpackList<String>,
+        #[starlark(require = named, default = UnpackList::default())] transforms: UnpackList<Value>,
         eval: &mut Evaluator,
     ) -> anyhow::Result<NoneType> {
         let s = state(eval)?;
         let package = s.package.clone();
+        let transforms = transforms
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| TransformValue::unpack(v, i))
+            .collect::<Result<Vec<_>>>()?;
         s.record(Decl::Import(ImportDecl {
             name,
             repo,
             git_ref: r#ref.to_owned(),
             into,
             patches: patches.items,
+            transforms,
             package,
         }))?;
         Ok(NoneType)
@@ -229,6 +336,73 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
             package,
         }))?;
         Ok(NoneType)
+    }
+
+    // --- transform value constructors (pure; usable anywhere, incl. libraries) ---
+    //
+    // These return a typed `transform` value and record nothing, so the
+    // "no rule instantiation in a library" guard does not apply: a `.scl`
+    // library may define reusable transform constants. They attach to an import
+    // via `github_import(..., transforms = [...])`.
+
+    /// A sed-like search/replace across blob contents of files matching `paths`.
+    fn replace<'v>(
+        #[starlark(require = named)] before: String,
+        #[starlark(require = named)] after: String,
+        #[starlark(require = named, default = UnpackList::default())] paths: UnpackList<String>,
+        #[starlark(require = named, default = false)] regex: bool,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(heap.alloc(TransformValue::new(TransformSpec::Replace {
+            before,
+            after,
+            paths: paths.items,
+            regex,
+        })))
+    }
+
+    /// Relocate a file or directory within the imported subtree.
+    fn r#move<'v>(
+        #[starlark(require = named)] src: String,
+        #[starlark(require = named)] dst: String,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(heap.alloc(TransformValue::new(TransformSpec::Move { src, dst })))
+    }
+
+    /// Duplicate a file or directory within the imported subtree.
+    fn copy<'v>(
+        #[starlark(require = named)] src: String,
+        #[starlark(require = named)] dst: String,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(heap.alloc(TransformValue::new(TransformSpec::Copy { src, dst })))
+    }
+
+    /// Rewrite each commit message: optional body substitution plus trailer
+    /// strip/add. The engine still always preserves the `CapyFun-Origin`/
+    /// `CapyFun-Import` trailers.
+    fn rewrite_message<'v>(
+        #[starlark(require = named)] before: Option<String>,
+        #[starlark(require = named)] after: Option<String>,
+        #[starlark(require = named, default = false)] regex: bool,
+        #[starlark(require = named, default = UnpackList::default())] strip_trailers: UnpackList<
+            String,
+        >,
+        #[starlark(require = named, default = UnpackList::default())] add_trailers: UnpackList<
+            String,
+        >,
+        heap: Heap<'v>,
+    ) -> anyhow::Result<Value<'v>> {
+        Ok(
+            heap.alloc(TransformValue::new(TransformSpec::RewriteMessage {
+                before,
+                after,
+                regex,
+                strip_trailers: strip_trailers.items,
+                add_trailers: add_trailers.items,
+            })),
+        )
     }
 }
 

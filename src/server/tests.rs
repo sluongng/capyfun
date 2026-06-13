@@ -15,6 +15,7 @@ fn test_ir() -> Ir {
             git_ref: "refs/heads/master".into(),
             dest: "third_party/go/github.com/google/uuid".into(),
             patches: vec![],
+            transforms: vec![],
         }],
         vendors: vec![Vendor {
             label: "//third_party/rust/anyhow:anyhow".into(),

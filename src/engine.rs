@@ -9,6 +9,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use git2::{Commit, Diff, Oid, Repository, Signature, Time, Tree};
 
+use crate::transform::Transform;
+
 /// Git filemode for a tree (subdirectory) entry.
 const FILEMODE_TREE: i32 = 0o040000;
 
@@ -184,11 +186,17 @@ pub fn replay_commit(
     dest: &str,
     origin: Oid,
     parent: Option<Oid>,
+    transforms: &[Transform],
 ) -> Result<Oid> {
     let origin_commit = repo
         .find_commit(origin)
         .with_context(|| format!("origin commit {origin} not found"))?;
+    // The imported subtree, upstream-shaped: rename `SRC` markers, then apply
+    // structural transforms (move/copy/replace) before it is spliced under
+    // `dest`, so all transform paths stay subtree-relative.
     let origin_tree = rename_src_markers(repo, origin_commit.tree()?.id())?;
+    let origin_tree = apply_structural_tree_transforms(repo, origin_tree, transforms)
+        .with_context(|| format!("applying transforms to origin commit {origin}"))?;
 
     let base_tree = match parent {
         Some(p) => repo.find_commit(p)?.tree()?.id(),
@@ -198,7 +206,11 @@ pub fn replay_commit(
     let new_tree_oid = splice_tree(repo, base_tree, dest, dest_subtree)?;
     let new_tree = repo.find_tree(new_tree_oid)?;
 
-    let message = with_mirror_trailers(origin_commit.message().unwrap_or(""), origin, dest);
+    // Rewrite the message (strip/add trailers, optional body sub) before the
+    // engine appends its own CapyFun-Origin / CapyFun-Import trailers.
+    let rewritten = apply_message_transforms(origin_commit.message().unwrap_or(""), transforms)
+        .with_context(|| format!("rewriting message of origin commit {origin}"))?;
+    let message = with_mirror_trailers(&rewritten, origin, dest);
 
     let parent_commit: Option<Commit> = match parent {
         Some(p) => Some(repo.find_commit(p)?),
@@ -283,6 +295,7 @@ pub fn import_mirror(
     dest: &str,
     origin_tip: Oid,
     base: Option<Oid>,
+    transforms: &[Transform],
 ) -> Result<ImportOutcome> {
     let last = last_imported_origin(repo, base, dest)?;
     if Some(origin_tip) == last {
@@ -294,7 +307,7 @@ pub fn import_mirror(
     let to_import = first_parent_delta(repo, origin_tip, last)?;
     let mut head = base;
     for origin in &to_import {
-        head = Some(replay_commit(repo, dest, *origin, head)?);
+        head = Some(replay_commit(repo, dest, *origin, head, transforms)?);
     }
     Ok(ImportOutcome {
         imported: to_import.len(),
@@ -519,10 +532,11 @@ pub fn import(
     dest: &str,
     origin_tip: Oid,
     branch_tip: Option<Oid>,
+    transforms: &[Transform],
     patches: &[PatchFile],
 ) -> Result<ImportOutcome> {
     let mirror_base = strip_patch_layer(repo, branch_tip, dest)?;
-    let mirror = import_mirror(repo, dest, origin_tip, mirror_base)?;
+    let mirror = import_mirror(repo, dest, origin_tip, mirror_base, transforms)?;
 
     let head = match (mirror.head, patches.is_empty()) {
         (_, true) => mirror.head,
@@ -536,6 +550,305 @@ pub fn import(
         imported: mirror.imported,
         head,
     })
+}
+
+// --- T2: structural transforms (mirror-time, applied per replayed commit) ---
+//
+// Structural transforms (`move`/`copy`/`replace`) rewrite the imported subtree
+// (upstream-shaped, all paths subtree-relative) before it is spliced under the
+// destination prefix; `rewrite_message` rewrites the commit message. They run on
+// every replayed commit, so the layout/content/message is consistent throughout
+// the mirrored history (filter-repo style), and the rewrite is deterministic:
+// the same input tree and transforms always yield the same output OID.
+
+/// Apply the tree-rewriting transforms (`move`/`copy`/`replace`) of a pipeline
+/// to `subtree`, in order, returning the rewritten subtree OID. Message
+/// transforms are ignored here (see [`apply_message_transforms`]).
+fn apply_structural_tree_transforms(
+    repo: &Repository,
+    subtree: Oid,
+    transforms: &[Transform],
+) -> Result<Oid> {
+    let mut tree = subtree;
+    for t in transforms {
+        tree = match t {
+            Transform::Move { src, dst } => move_or_copy(repo, tree, src, dst, true)?,
+            Transform::Copy { src, dst } => move_or_copy(repo, tree, src, dst, false)?,
+            Transform::Replace {
+                before,
+                after,
+                paths,
+                regex,
+            } => apply_replace(repo, tree, before, after, paths, *regex)?,
+            // Message-only transforms do not touch the tree.
+            Transform::RewriteMessage { .. } => tree,
+        };
+    }
+    Ok(tree)
+}
+
+/// Read the tree entry (object id + filemode) at the slash-separated subtree path
+/// `rel`, or `None` if no entry exists there.
+fn entry_at(repo: &Repository, tree: Oid, rel: &str) -> Result<Option<(Oid, i32)>> {
+    let tree = repo.find_tree(tree)?;
+    match tree.get_path(Path::new(rel)) {
+        Ok(e) => Ok(Some((e.id(), e.filemode()))),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Rebuild `tree` with `rel` set to `entry` (insert/replace) or removed
+/// (`entry == None`), creating or pruning intermediate directories as needed.
+/// Returns the new tree OID. Determinism: identical inputs yield identical OIDs.
+fn set_path(repo: &Repository, tree: Oid, rel: &str, entry: Option<(Oid, i32)>) -> Result<Oid> {
+    let comps: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    anyhow::ensure!(!comps.is_empty(), "transform path must not be empty");
+    set_path_rec(repo, Some(&repo.find_tree(tree)?), &comps, entry)
+}
+
+fn set_path_rec(
+    repo: &Repository,
+    base: Option<&Tree>,
+    comps: &[&str],
+    entry: Option<(Oid, i32)>,
+) -> Result<Oid> {
+    let (head, rest) = comps.split_first().expect("non-empty comps");
+    let mut builder = repo.treebuilder(base)?;
+    if rest.is_empty() {
+        match entry {
+            Some((oid, mode)) => builder.insert(head, oid, mode)?,
+            None => {
+                if builder.get(head)?.is_some() {
+                    builder.remove(head)?;
+                }
+                return Ok(builder.write()?);
+            }
+        };
+    } else {
+        let child = base
+            .and_then(|t| t.get_name(head))
+            .filter(|e| e.kind() == Some(git2::ObjectType::Tree))
+            .and_then(|e| repo.find_tree(e.id()).ok());
+        let new_child = set_path_rec(repo, child.as_ref(), rest, entry)?;
+        // Prune the directory if it became empty (only when removing).
+        if entry.is_none() && repo.find_tree(new_child)?.is_empty() {
+            if builder.get(head)?.is_some() {
+                builder.remove(head)?;
+            }
+        } else {
+            builder.insert(head, new_child, FILEMODE_TREE)?;
+        }
+    }
+    Ok(builder.write()?)
+}
+
+/// Move (`remove_src = true`) or copy (`false`) the entry at `src` to `dst`
+/// within `subtree`. A `src` that does not exist is an error so a stale
+/// `move`/`copy` is loud rather than silently a no-op.
+fn move_or_copy(
+    repo: &Repository,
+    subtree: Oid,
+    src: &str,
+    dst: &str,
+    remove_src: bool,
+) -> Result<Oid> {
+    let entry = entry_at(repo, subtree, src)?
+        .with_context(|| format!("transform source `{src}` does not exist in the subtree"))?;
+    let mut tree = set_path(repo, subtree, dst, Some(entry))?;
+    if remove_src && src != dst {
+        tree = set_path(repo, tree, src, None)?;
+    }
+    Ok(tree)
+}
+
+/// Apply a `replace` to every blob in `subtree` whose subtree-relative path
+/// matches one of `paths`. With `regex == false`, `before`/`after` are literal;
+/// otherwise `before` is a regex and `after` may use `$N` capture references.
+fn apply_replace(
+    repo: &Repository,
+    subtree: Oid,
+    before: &str,
+    after: &str,
+    paths: &[String],
+    regex: bool,
+) -> Result<Oid> {
+    let re = if regex {
+        Some(
+            regex::Regex::new(before)
+                .with_context(|| format!("invalid replace regex `{before}`"))?,
+        )
+    } else {
+        None
+    };
+    replace_walk(repo, subtree, "", paths, before, after, re.as_ref())
+}
+
+/// Recursively rebuild `tree`, rewriting matching blobs. `prefix` is the
+/// subtree-relative directory path accumulated so far (no leading slash).
+fn replace_walk(
+    repo: &Repository,
+    tree: Oid,
+    prefix: &str,
+    paths: &[String],
+    before: &str,
+    after: &str,
+    re: Option<&regex::Regex>,
+) -> Result<Oid> {
+    let tree = repo.find_tree(tree)?;
+    let mut builder = repo.treebuilder(None)?;
+    for entry in tree.iter() {
+        let name = entry.name().context("non-UTF-8 tree entry name")?;
+        let path = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.kind() == Some(git2::ObjectType::Tree) {
+            let rewritten = replace_walk(repo, entry.id(), &path, paths, before, after, re)?;
+            builder.insert(name, rewritten, entry.filemode())?;
+        } else if entry.kind() == Some(git2::ObjectType::Blob)
+            && paths.iter().any(|g| glob_match(g, &path))
+        {
+            let blob = repo.find_blob(entry.id())?;
+            let new_oid = match std::str::from_utf8(blob.content()) {
+                Ok(text) => {
+                    let replaced = match re {
+                        Some(re) => re.replace_all(text, after).into_owned(),
+                        None => text.replace(before, after),
+                    };
+                    if replaced == text {
+                        entry.id()
+                    } else {
+                        repo.blob(replaced.as_bytes())?
+                    }
+                }
+                // Binary file: leave untouched (replace is a text operation).
+                Err(_) => entry.id(),
+            };
+            builder.insert(name, new_oid, entry.filemode())?;
+        } else {
+            builder.insert(name, entry.id(), entry.filemode())?;
+        }
+    }
+    Ok(builder.write()?)
+}
+
+/// Match a slash-separated `path` against a glob `pattern`. Supports `?` (one
+/// non-`/` char), `*` (run of non-`/` chars), and `**` (any run including `/`).
+/// A leading `**/` also matches zero directories, so `**/*.go` matches `x.go`.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    // `**/` matching zero directories: also try the pattern with the prefix
+    // dropped, so `**/x` matches a top-level `x`.
+    if let Some(rest) = pattern.strip_prefix("**/") {
+        if glob_match(rest, path) {
+            return true;
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = path.chars().collect();
+    glob_rec(&p, &t)
+}
+
+fn glob_rec(p: &[char], t: &[char]) -> bool {
+    if p.is_empty() {
+        return t.is_empty();
+    }
+    match p[0] {
+        '*' if p.get(1) == Some(&'*') => {
+            // `**`: match any run, including `/`.
+            let rest = &p[2..];
+            // Skip an immediately following `/` so `**/x` can match `x` too.
+            let rest = rest.strip_prefix(&['/']).unwrap_or(rest);
+            (0..=t.len()).any(|i| glob_rec(rest, &t[i..]))
+        }
+        '*' => {
+            // `*`: match a run of non-`/` chars.
+            let rest = &p[1..];
+            let mut i = 0;
+            loop {
+                if glob_rec(rest, &t[i..]) {
+                    return true;
+                }
+                if i >= t.len() || t[i] == '/' {
+                    return false;
+                }
+                i += 1;
+            }
+        }
+        '?' => !t.is_empty() && t[0] != '/' && glob_rec(&p[1..], &t[1..]),
+        c => !t.is_empty() && t[0] == c && glob_rec(&p[1..], &t[1..]),
+    }
+}
+
+/// Apply the `rewrite_message` transforms of a pipeline to a commit message, in
+/// order. Tree transforms are ignored here. Trailer strips/adds and the optional
+/// body substitution are applied; the engine's own trailers are added later.
+fn apply_message_transforms(message: &str, transforms: &[Transform]) -> Result<String> {
+    let mut msg = message.to_owned();
+    for t in transforms {
+        if let Transform::RewriteMessage {
+            before,
+            after,
+            regex,
+            strip_trailers,
+            add_trailers,
+        } = t
+        {
+            msg = rewrite_message(&msg, before, after, *regex, strip_trailers, add_trailers)?;
+        }
+    }
+    Ok(msg)
+}
+
+/// Rewrite one message: optional body substitution, then strip the named
+/// trailers, then append the given trailer lines.
+fn rewrite_message(
+    message: &str,
+    before: &Option<String>,
+    after: &Option<String>,
+    regex: bool,
+    strip_trailers: &[String],
+    add_trailers: &[String],
+) -> Result<String> {
+    let mut msg = message.to_owned();
+
+    if let (Some(before), Some(after)) = (before, after) {
+        msg = if regex {
+            let re = regex::Regex::new(before)
+                .with_context(|| format!("invalid rewrite_message regex `{before}`"))?;
+            re.replace_all(&msg, after.as_str()).into_owned()
+        } else {
+            msg.replace(before, after)
+        };
+    }
+
+    if !strip_trailers.is_empty() {
+        let kept: Vec<&str> = msg
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !strip_trailers.iter().any(|key| {
+                    trimmed
+                        .strip_prefix(key)
+                        .and_then(|r| r.strip_prefix(':'))
+                        .is_some()
+                })
+            })
+            .collect();
+        msg = kept.join("\n");
+    }
+
+    if !add_trailers.is_empty() {
+        let body = msg.trim_end();
+        let added = add_trailers.join("\n");
+        msg = if body.is_empty() {
+            added
+        } else {
+            format!("{body}\n{added}")
+        };
+    }
+
+    Ok(msg)
 }
 
 #[cfg(test)]

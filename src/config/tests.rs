@@ -182,3 +182,75 @@ fn discovery_skips_git_and_target() {
     let cfg = evaluate(&root).unwrap();
     assert_eq!(imports(&cfg).len(), 1);
 }
+
+// --- transforms ---
+
+#[test]
+fn transforms_are_captured_in_order() {
+    let (_dir, root) = write_tree(&[(
+        "SRC",
+        "monorepo(name = \"m\", default_branch = \"main\")\n\
+         github_import(\n\
+         \x20   name = \"w\", repo = \"acme/w\",\n\
+         \x20   transforms = [\n\
+         \x20       replace(before = \"a\", after = \"b\", paths = [\"**/*.go\"]),\n\
+         \x20       move(src = \"pkg\", dst = \"lib\"),\n\
+         \x20       copy(src = \"x\", dst = \"y\"),\n\
+         \x20       rewrite_message(strip_trailers = [\"Internal-Review\"]),\n\
+         \x20   ],\n\
+         )\n",
+    )]);
+    let cfg = evaluate(&root).unwrap();
+    let imp = imports(&cfg);
+    assert_eq!(imp.len(), 1);
+    let ts = &imp[0].transforms;
+    assert_eq!(ts.len(), 4);
+    assert!(matches!(
+        &ts[0],
+        TransformSpec::Replace { before, after, paths, regex: false }
+            if before == "a" && after == "b" && paths == &vec!["**/*.go".to_string()]
+    ));
+    assert!(matches!(&ts[1], TransformSpec::Move { src, dst } if src == "pkg" && dst == "lib"));
+    assert!(matches!(&ts[2], TransformSpec::Copy { src, dst } if src == "x" && dst == "y"));
+    assert!(matches!(
+        &ts[3],
+        TransformSpec::RewriteMessage { strip_trailers, .. } if strip_trailers == &vec!["Internal-Review".to_string()]
+    ));
+}
+
+#[test]
+fn transform_constructors_are_usable_in_a_library() {
+    // Value constructors record nothing, so a `.scl` library may build transform
+    // constants and an SRC may load and attach them.
+    let (_dir, root) = write_tree(&[
+        ("SRC", "monorepo(name = \"m\", default_branch = \"main\")\n"),
+        (
+            "lib/t.scl",
+            "SCRUB = replace(before = \"internal/\", after = \"\", paths = [\"**/*.go\"])\n",
+        ),
+        (
+            "third_party/x/SRC",
+            "load(\"//lib/t.scl\", \"SCRUB\")\n\
+             github_import(name = \"x\", repo = \"acme/x\", transforms = [SCRUB])\n",
+        ),
+    ]);
+    let cfg = evaluate(&root).unwrap();
+    let imp = imports(&cfg);
+    assert_eq!(imp.len(), 1);
+    assert_eq!(imp[0].transforms.len(), 1);
+    assert!(matches!(
+        &imp[0].transforms[0],
+        TransformSpec::Replace { .. }
+    ));
+}
+
+#[test]
+fn non_transform_in_transforms_list_errors() {
+    let (_dir, root) = write_tree(&[(
+        "SRC",
+        "github_import(name = \"x\", repo = \"acme/x\", transforms = [\"oops\"])\n",
+    )]);
+    let err = evaluate(&root).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("not a transform"), "unexpected error: {msg}");
+}

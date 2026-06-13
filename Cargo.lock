@@ -277,10 +277,12 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 name = "capyfun"
 version = "0.0.0"
 dependencies = [
+ "allocative",
  "anyhow",
  "clap",
  "flate2",
  "git2",
+ "regex",
  "serde",
  "serde_json",
  "starlark",

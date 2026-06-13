@@ -19,5 +19,6 @@ pub mod gomod;
 pub mod ir;
 pub mod npm;
 pub mod server;
+pub mod transform;
 pub mod validate;
 pub mod vendorgen;

@@ -20,6 +20,7 @@ fn ir_with_uuid_import() -> Ir {
             git_ref: "refs/heads/master".into(),
             dest: "third_party/go/github.com/google/uuid".into(),
             patches: vec![],
+            transforms: vec![],
         }],
         vendors: vec![],
         exports: vec![],

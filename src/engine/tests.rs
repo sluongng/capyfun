@@ -222,7 +222,7 @@ fn replay_first_commit_into_dest() {
     );
     let origin = commit(&repo, origin_tree, "add server\n", &[]);
 
-    let mirror = replay_commit(&repo, "third_party/backend", origin, None).unwrap();
+    let mirror = replay_commit(&repo, "third_party/backend", origin, None, &[]).unwrap();
     let mc = repo.find_commit(mirror).unwrap();
 
     // Tree: origin content nested under the destination prefix.
@@ -257,7 +257,7 @@ fn replay_onto_parent_links_and_preserves_base() {
     let origin_tree = write_tree(&repo, &[("lib.go", "lib")]);
     let origin = commit(&repo, origin_tree, "init lib\n", &[]);
 
-    let mirror = replay_commit(&repo, "third_party/lib", origin, Some(parent)).unwrap();
+    let mirror = replay_commit(&repo, "third_party/lib", origin, Some(parent), &[]).unwrap();
     let mc = repo.find_commit(mirror).unwrap();
 
     assert_eq!(mc.parent_count(), 1);
@@ -273,8 +273,8 @@ fn replay_is_deterministic() {
     let (_d, repo) = temp_repo();
     let origin_tree = write_tree(&repo, &[("f", "f")]);
     let origin = commit(&repo, origin_tree, "c\n", &[]);
-    let a = replay_commit(&repo, "vendor/x", origin, None).unwrap();
-    let b = replay_commit(&repo, "vendor/x", origin, None).unwrap();
+    let a = replay_commit(&repo, "vendor/x", origin, None, &[]).unwrap();
+    let b = replay_commit(&repo, "vendor/x", origin, None, &[]).unwrap();
     assert_eq!(a, b);
 }
 
@@ -321,7 +321,7 @@ fn imports_full_history_then_is_idempotent() {
     let c2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "c2\n", &[c1]);
     let c3 = commit(&repo, write_tree(&repo, &[("a", "3")]), "c3\n", &[c2]);
 
-    let first = import_mirror(&repo, "third_party/x", c3, None).unwrap();
+    let first = import_mirror(&repo, "third_party/x", c3, None, &[]).unwrap();
     assert_eq!(first.imported, 3);
     let head = first.head.unwrap();
 
@@ -334,7 +334,7 @@ fn imports_full_history_then_is_idempotent() {
     assert_eq!(tip_files.get("third_party/x/a").unwrap(), "3");
 
     // Re-running with the same origin tip imports nothing.
-    let again = import_mirror(&repo, "third_party/x", c3, Some(head)).unwrap();
+    let again = import_mirror(&repo, "third_party/x", c3, Some(head), &[]).unwrap();
     assert_eq!(again.imported, 0);
     assert_eq!(again.head, Some(head));
 }
@@ -345,7 +345,7 @@ fn imports_only_the_delta() {
     let c1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "c1\n", &[]);
     let c2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "c2\n", &[c1]);
 
-    let first = import_mirror(&repo, "vendor", c2, None).unwrap();
+    let first = import_mirror(&repo, "vendor", c2, None, &[]).unwrap();
     assert_eq!(first.imported, 2);
     let head = first.head.unwrap();
 
@@ -353,7 +353,7 @@ fn imports_only_the_delta() {
     let c3 = commit(&repo, write_tree(&repo, &[("a", "3")]), "c3\n", &[c2]);
     let c4 = commit(&repo, write_tree(&repo, &[("a", "4")]), "c4\n", &[c3]);
 
-    let delta = import_mirror(&repo, "vendor", c4, Some(head)).unwrap();
+    let delta = import_mirror(&repo, "vendor", c4, Some(head), &[]).unwrap();
     assert_eq!(delta.imported, 2, "only c3, c4 are new");
     let new_head = delta.head.unwrap();
     assert_eq!(
@@ -387,7 +387,7 @@ fn linearizes_merges_to_first_parent() {
         &[c2, f1],
     );
 
-    let out = import_mirror(&repo, "lib", merge, None).unwrap();
+    let out = import_mirror(&repo, "lib", merge, None, &[]).unwrap();
     // First-parent chain merge->c2->c1 = 3 commits; f1 is NOT mirrored.
     assert_eq!(out.imported, 3);
     let head = out.head.unwrap();
@@ -406,11 +406,14 @@ fn linearizes_merges_to_first_parent() {
 fn diverged_history_errors() {
     let (_d, repo) = temp_repo();
     let c1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "c1\n", &[]);
-    let head = import_mirror(&repo, "x", c1, None).unwrap().head.unwrap();
+    let head = import_mirror(&repo, "x", c1, None, &[])
+        .unwrap()
+        .head
+        .unwrap();
 
     // A fresh origin root with no relation to c1 (force-push simulation).
     let other = commit(&repo, write_tree(&repo, &[("a", "z")]), "other\n", &[]);
-    let err = import_mirror(&repo, "x", other, Some(head)).unwrap_err();
+    let err = import_mirror(&repo, "x", other, Some(head), &[]).unwrap_err();
     assert!(format!("{err:#}").contains("no longer contains"), "{err:#}");
 }
 
@@ -422,12 +425,12 @@ fn two_imports_share_a_branch_without_conflating_maps() {
     let a2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "a2\n", &[a1]);
     let b1 = commit(&repo, write_tree(&repo, &[("b", "1")]), "b1\n", &[]);
 
-    let head_a = import_mirror(&repo, "third_party/a", a2, None)
+    let head_a = import_mirror(&repo, "third_party/a", a2, None, &[])
         .unwrap()
         .head
         .unwrap();
     // Importing B onto the same branch must NOT treat A's trailers as B's map.
-    let rb = import_mirror(&repo, "third_party/b", b1, Some(head_a)).unwrap();
+    let rb = import_mirror(&repo, "third_party/b", b1, Some(head_a), &[]).unwrap();
     assert_eq!(rb.imported, 1, "B's history is independent of A's");
     let head_b = rb.head.unwrap();
 
@@ -439,7 +442,7 @@ fn two_imports_share_a_branch_without_conflating_maps() {
     assert_eq!(files.get("third_party/b/b").unwrap(), "1");
 
     // Re-importing A is still idempotent even though B sits on top of it.
-    let again = import_mirror(&repo, "third_party/a", a2, Some(head_b)).unwrap();
+    let again = import_mirror(&repo, "third_party/a", a2, Some(head_b), &[]).unwrap();
     assert_eq!(again.imported, 0);
 }
 
@@ -476,7 +479,7 @@ fn patch_layer_stacks_commits_with_trailers() {
     // Mirror tip: one commit with go.mod under dest.
     let sub0 = write_tree(&repo, &[("go.mod", "module x\n\ngo 1.21\n")]);
     let origin = commit(&repo, sub0, "init\n", &[]);
-    let mirror = import_mirror(&repo, "third_party/backend", origin, None)
+    let mirror = import_mirror(&repo, "third_party/backend", origin, None, &[])
         .unwrap()
         .head
         .unwrap();
@@ -531,7 +534,7 @@ fn failing_patch_aborts_without_moving_state() {
     let (_d, repo) = temp_repo();
     let sub0 = write_tree(&repo, &[("go.mod", "module x\n\ngo 1.21\n")]);
     let origin = commit(&repo, sub0, "init\n", &[]);
-    let mirror = import_mirror(&repo, "dst", origin, None)
+    let mirror = import_mirror(&repo, "dst", origin, None, &[])
         .unwrap()
         .head
         .unwrap();
@@ -565,12 +568,20 @@ fn import_with_patches_is_idempotent_and_rebases() {
         bytes: make_patch(&repo, sub_v1, sub_v1_patched),
     };
 
-    let first = import(&repo, "dst", c1, None, std::slice::from_ref(&patch)).unwrap();
+    let first = import(&repo, "dst", c1, None, &[], std::slice::from_ref(&patch)).unwrap();
     assert_eq!(first.imported, 1);
     let tip1 = first.head.unwrap();
 
     // Re-run, same upstream + same patch: nothing new, identical tip OID.
-    let again = import(&repo, "dst", c1, Some(tip1), std::slice::from_ref(&patch)).unwrap();
+    let again = import(
+        &repo,
+        "dst",
+        c1,
+        Some(tip1),
+        &[],
+        std::slice::from_ref(&patch),
+    )
+    .unwrap();
     assert_eq!(again.imported, 0);
     assert_eq!(
         again.head,
@@ -583,7 +594,15 @@ fn import_with_patches_is_idempotent_and_rebases() {
     let v2 = "module acme/widget\n\ngo 1.21\n\n// pad a\n// pad b\n// pad c\n// pad d\n\nrequire cobra v1.9.0\n";
     let sub_v2 = write_tree(&repo, &[("go.mod", v2)]);
     let c2 = commit(&repo, sub_v2, "bump cobra\n", &[c1]);
-    let third = import(&repo, "dst", c2, Some(tip1), std::slice::from_ref(&patch)).unwrap();
+    let third = import(
+        &repo,
+        "dst",
+        c2,
+        Some(tip1),
+        &[],
+        std::slice::from_ref(&patch),
+    )
+    .unwrap();
     assert_eq!(third.imported, 1, "only c2 is new");
     let tip2 = third.head.unwrap();
 
@@ -634,7 +653,7 @@ fn imported_src_files_are_renamed_to_orig_src() {
         &[],
     );
 
-    let mirror = replay_commit(&repo, "dst", origin, Some(base)).unwrap();
+    let mirror = replay_commit(&repo, "dst", origin, Some(base), &[]).unwrap();
     let files = read_tree(
         &repo,
         repo.find_commit(mirror).unwrap().tree().unwrap().id(),
@@ -671,4 +690,248 @@ fn vendor_also_renames_src_markers() {
     assert_eq!(files.get("third_party/rust/dep/ORIG_SRC").unwrap(), "up");
     assert_eq!(files.get("third_party/rust/dep/lib.rs").unwrap(), "code");
     assert!(!files.contains_key("third_party/rust/dep/SRC"));
+}
+
+// --- T2: structural transforms (mirror-time, per-commit) ---
+
+#[test]
+fn glob_match_handles_double_star_and_single() {
+    assert!(glob_match("**/*.go", "main.go"));
+    assert!(glob_match("**/*.go", "a/b/main.go"));
+    assert!(glob_match("*.go", "main.go"));
+    assert!(!glob_match("*.go", "a/main.go")); // `*` does not cross `/`
+    assert!(glob_match("pkg/**", "pkg/a/b.go"));
+    assert!(glob_match("pkg/*.go", "pkg/x.go"));
+    assert!(!glob_match("pkg/*.go", "pkg/sub/x.go"));
+    assert!(glob_match("a?c", "abc"));
+    assert!(!glob_match("a?c", "a/c"));
+    assert!(!glob_match("*.go", "main.rs"));
+}
+
+#[test]
+fn replace_rewrites_matching_blobs_every_commit() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(
+        &repo,
+        write_tree(
+            &repo,
+            &[
+                ("a.go", "import acme.internal/x\n"),
+                ("README", "acme.internal/x"),
+            ],
+        ),
+        "c1\n",
+        &[],
+    );
+    let c2 = commit(
+        &repo,
+        write_tree(
+            &repo,
+            &[
+                ("a.go", "import acme.internal/y\n"),
+                ("README", "acme.internal/x"),
+            ],
+        ),
+        "c2\n",
+        &[c1],
+    );
+    let transforms = vec![Transform::Replace {
+        before: "acme.internal/".into(),
+        after: "".into(),
+        paths: vec!["**/*.go".into()],
+        regex: false,
+    }];
+
+    let out = import_mirror(&repo, "dst", c2, None, &transforms).unwrap();
+    assert_eq!(out.imported, 2);
+    let head = out.head.unwrap();
+
+    // Tip: .go scrubbed, README (not matched) untouched.
+    let tip = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    assert_eq!(tip.get("dst/a.go").unwrap(), "import y\n");
+    assert_eq!(tip.get("dst/README").unwrap(), "acme.internal/x");
+
+    // The parent mirror commit (c1) was scrubbed too — applied per commit.
+    let parent = repo.find_commit(head).unwrap().parent_id(0).unwrap();
+    let pfiles = read_tree(
+        &repo,
+        repo.find_commit(parent).unwrap().tree().unwrap().id(),
+    );
+    assert_eq!(pfiles.get("dst/a.go").unwrap(), "import x\n");
+}
+
+#[test]
+fn replace_regex_uses_capture_groups() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(
+        &repo,
+        write_tree(&repo, &[("x.go", "v1.2.3 release")]),
+        "c1\n",
+        &[],
+    );
+    let transforms = vec![Transform::Replace {
+        before: r"v(\d+)\.(\d+)\.(\d+)".into(),
+        after: "$1-$2-$3".into(),
+        paths: vec!["*.go".into()],
+        regex: true,
+    }];
+    let head = import_mirror(&repo, "dst", c1, None, &transforms)
+        .unwrap()
+        .head
+        .unwrap();
+    let files = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    assert_eq!(files.get("dst/x.go").unwrap(), "1-2-3 release");
+}
+
+#[test]
+fn move_relocates_directory_within_subtree() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(
+        &repo,
+        write_tree(
+            &repo,
+            &[("pkg/a.go", "a"), ("pkg/sub/b.go", "b"), ("top", "t")],
+        ),
+        "c1\n",
+        &[],
+    );
+    let transforms = vec![Transform::Move {
+        src: "pkg".into(),
+        dst: "lib".into(),
+    }];
+    let head = import_mirror(&repo, "dst", c1, None, &transforms)
+        .unwrap()
+        .head
+        .unwrap();
+    let files = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    assert_eq!(files.get("dst/lib/a.go").unwrap(), "a");
+    assert_eq!(files.get("dst/lib/sub/b.go").unwrap(), "b");
+    assert!(!files.keys().any(|k| k.starts_with("dst/pkg/")));
+    assert_eq!(files.get("dst/top").unwrap(), "t");
+}
+
+#[test]
+fn copy_duplicates_keeping_source() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(&repo, write_tree(&repo, &[("a.txt", "hi")]), "c1\n", &[]);
+    let transforms = vec![Transform::Copy {
+        src: "a.txt".into(),
+        dst: "b/a.txt".into(),
+    }];
+    let head = import_mirror(&repo, "dst", c1, None, &transforms)
+        .unwrap()
+        .head
+        .unwrap();
+    let files = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    assert_eq!(files.get("dst/a.txt").unwrap(), "hi");
+    assert_eq!(files.get("dst/b/a.txt").unwrap(), "hi");
+}
+
+#[test]
+fn move_missing_source_errors() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(&repo, write_tree(&repo, &[("a", "a")]), "c1\n", &[]);
+    let transforms = vec![Transform::Move {
+        src: "nope".into(),
+        dst: "x".into(),
+    }];
+    let err = import_mirror(&repo, "dst", c1, None, &transforms).unwrap_err();
+    assert!(format!("{err:#}").contains("does not exist"), "{err:#}");
+}
+
+#[test]
+fn rewrite_message_strips_and_adds_trailers_per_commit() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(
+        &repo,
+        write_tree(&repo, &[("a", "1")]),
+        "do a thing\n\nInternal-Review: secret\n",
+        &[],
+    );
+    let transforms = vec![Transform::RewriteMessage {
+        before: None,
+        after: None,
+        regex: false,
+        strip_trailers: vec!["Internal-Review".into()],
+        add_trailers: vec!["Reviewed-by: capybara".into()],
+    }];
+    let head = import_mirror(&repo, "dst", c1, None, &transforms)
+        .unwrap()
+        .head
+        .unwrap();
+    let msg = repo
+        .find_commit(head)
+        .unwrap()
+        .message()
+        .unwrap()
+        .to_owned();
+    assert!(msg.starts_with("do a thing"), "{msg}");
+    assert!(!msg.contains("Internal-Review"), "{msg}");
+    assert!(msg.contains("Reviewed-by: capybara"), "{msg}");
+    // The engine still appends its own trailers.
+    assert_eq!(
+        parse_origin_trailer(&msg).as_deref(),
+        Some(c1.to_string().as_str())
+    );
+    assert_eq!(trailer_value(&msg, IMPORT_TRAILER).as_deref(), Some("dst"));
+}
+
+#[test]
+fn structural_transforms_are_deterministic() {
+    let (_d, repo) = temp_repo();
+    let c1 = commit(
+        &repo,
+        write_tree(&repo, &[("pkg/a.go", "acme.internal/x")]),
+        "c1\n",
+        &[],
+    );
+    let transforms = vec![
+        Transform::Replace {
+            before: "acme.internal/".into(),
+            after: "".into(),
+            paths: vec!["**/*.go".into()],
+            regex: false,
+        },
+        Transform::Move {
+            src: "pkg".into(),
+            dst: "lib".into(),
+        },
+    ];
+    let a = replay_commit(&repo, "dst", c1, None, &transforms).unwrap();
+    let b = replay_commit(&repo, "dst", c1, None, &transforms).unwrap();
+    assert_eq!(a, b, "same inputs + transforms => same commit OID");
+}
+
+#[test]
+fn transforms_apply_to_incremental_delta_too() {
+    let (_d, repo) = temp_repo();
+    let transforms = vec![Transform::Replace {
+        before: "OLD".into(),
+        after: "NEW".into(),
+        paths: vec!["*.txt".into()],
+        regex: false,
+    }];
+    let c1 = commit(&repo, write_tree(&repo, &[("f.txt", "OLD a")]), "c1\n", &[]);
+    let head1 = import_mirror(&repo, "dst", c1, None, &transforms)
+        .unwrap()
+        .head
+        .unwrap();
+
+    let c2 = commit(
+        &repo,
+        write_tree(&repo, &[("f.txt", "OLD b")]),
+        "c2\n",
+        &[c1],
+    );
+    let out = import_mirror(&repo, "dst", c2, Some(head1), &transforms).unwrap();
+    assert_eq!(out.imported, 1);
+    let files = read_tree(
+        &repo,
+        repo.find_commit(out.head.unwrap())
+            .unwrap()
+            .tree()
+            .unwrap()
+            .id(),
+    );
+    assert_eq!(files.get("dst/f.txt").unwrap(), "NEW b");
 }

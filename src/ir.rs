@@ -7,7 +7,8 @@
 
 use serde::Serialize;
 
-use crate::config::{Decl, RawConfig};
+use crate::config::{Decl, RawConfig, TransformSpec};
+use crate::transform::{Phase, Transform};
 use crate::validate;
 
 /// The validated, normalized configuration.
@@ -39,6 +40,12 @@ pub struct Import {
     pub dest: String,
     /// Monorepo-root-relative patch files (resolved against the SRC package).
     pub patches: Vec<String>,
+    /// Validated transform pipeline, ordered mirror-phase first then tip-phase,
+    /// preserving source order within each phase. All paths/text are
+    /// subtree-relative (not package-anchored); they apply to the imported
+    /// subtree before it is spliced under `dest`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<Transform>,
 }
 
 /// A pinned-snapshot git dependency (`git_repository`).
@@ -178,6 +185,7 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                         join_dir(dir, Some(p))
                     })
                     .collect();
+                let transforms = lower_transforms(&label, &d.transforms, &mut errors);
                 imports.push(Import {
                     label,
                     name: d.name.clone(),
@@ -186,6 +194,7 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                     git_ref: d.git_ref.clone(),
                     dest,
                     patches,
+                    transforms,
                 });
             }
             Decl::Export(d) => {
@@ -268,6 +277,91 @@ fn check_unique_names(entries: &[(&str, &str, &str)], errors: &mut Vec<String>) 
             errors.push(format!("duplicate rule name in package {package}: {label}"));
         } else {
             seen.push((package.to_string(), name.to_string()));
+        }
+    }
+}
+
+/// Lower a captured transform list into validated IR transforms.
+///
+/// Each transform's subtree-relative paths are validated (no escape/absolute/`..`
+/// segments) via [`validate::check_rel_path`]. The result is reordered by
+/// [`Phase`] — mirror-phase transforms first, then tip-phase — with source order
+/// preserved within each phase (a stable partition), matching the engine's
+/// "mirror runs before tip" contract. `label` prefixes diagnostics.
+fn lower_transforms(
+    label: &str,
+    specs: &[TransformSpec],
+    errors: &mut Vec<String>,
+) -> Vec<Transform> {
+    let mut transforms: Vec<Transform> = specs
+        .iter()
+        .map(|spec| lower_transform(label, spec, errors))
+        .collect();
+    // Stable partition: mirror-phase entries keep their relative order, then tip.
+    transforms.sort_by_key(|t| match t.phase() {
+        Phase::Mirror => 0,
+        Phase::Tip => 1,
+    });
+    transforms
+}
+
+/// Lower and validate one transform spec into an IR transform.
+fn lower_transform(label: &str, spec: &TransformSpec, errors: &mut Vec<String>) -> Transform {
+    match spec {
+        TransformSpec::Replace {
+            before,
+            after,
+            paths,
+            regex,
+        } => {
+            for p in paths {
+                validate::check_glob_path(label, "replace paths", p, errors);
+            }
+            if before.is_empty() {
+                errors.push(format!("{label}: replace `before` is empty"));
+            }
+            Transform::Replace {
+                before: before.clone(),
+                after: after.clone(),
+                paths: paths.clone(),
+                regex: *regex,
+            }
+        }
+        TransformSpec::Move { src, dst } => {
+            validate::check_rel_path(label, "move src", src, errors);
+            validate::check_rel_path(label, "move dst", dst, errors);
+            Transform::Move {
+                src: src.clone(),
+                dst: dst.clone(),
+            }
+        }
+        TransformSpec::Copy { src, dst } => {
+            validate::check_rel_path(label, "copy src", src, errors);
+            validate::check_rel_path(label, "copy dst", dst, errors);
+            Transform::Copy {
+                src: src.clone(),
+                dst: dst.clone(),
+            }
+        }
+        TransformSpec::RewriteMessage {
+            before,
+            after,
+            regex,
+            strip_trailers,
+            add_trailers,
+        } => {
+            if before.is_some() != after.is_some() {
+                errors.push(format!(
+                    "{label}: rewrite_message requires `before` and `after` together"
+                ));
+            }
+            Transform::RewriteMessage {
+                before: before.clone(),
+                after: after.clone(),
+                regex: *regex,
+                strip_trailers: strip_trailers.clone(),
+                add_trailers: add_trailers.clone(),
+            }
         }
     }
 }

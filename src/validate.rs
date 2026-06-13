@@ -53,6 +53,15 @@ pub(crate) fn check_rel_path(label: &str, kind: &str, path: &str, errors: &mut V
     }
 }
 
+/// Validate a subtree-relative glob pattern (e.g. `**/*.go`).
+///
+/// Globs are relative paths whose segments may contain `*`/`?` wildcards, so the
+/// same escape rules apply: a glob must be non-empty, not absolute, and contain
+/// no empty, `.`, or `..` segments (so it cannot match outside the subtree).
+pub(crate) fn check_glob_path(label: &str, kind: &str, glob: &str, errors: &mut Vec<String>) {
+    check_rel_path(label, kind, glob, errors);
+}
+
 /// Two paths conflict when they are equal or one is an ancestor of the other.
 fn paths_overlap(a: &str, b: &str) -> bool {
     if a == b {

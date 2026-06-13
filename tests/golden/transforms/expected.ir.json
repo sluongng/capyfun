@@ -1,0 +1,52 @@
+{
+  "monorepo": {
+    "name": "acme",
+    "default_branch": "main"
+  },
+  "imports": [
+    {
+      "label": "//third_party/widget:widget",
+      "name": "widget",
+      "package": "//third_party/widget",
+      "repo": "acme/widget",
+      "ref": "refs/heads/main",
+      "dest": "third_party/widget",
+      "patches": [],
+      "transforms": [
+        {
+          "kind": "replace",
+          "before": "acme.internal/",
+          "after": "",
+          "paths": [
+            "**/*.go"
+          ],
+          "regex": false
+        },
+        {
+          "kind": "move",
+          "src": "pkg",
+          "dst": "lib"
+        },
+        {
+          "kind": "copy",
+          "src": "VERSION",
+          "dst": "lib/VERSION"
+        },
+        {
+          "kind": "rewrite_message",
+          "before": "WIP: ",
+          "after": "",
+          "regex": false,
+          "strip_trailers": [
+            "Internal-Review"
+          ],
+          "add_trailers": [
+            "Imported-by: capyfun"
+          ]
+        }
+      ]
+    }
+  ],
+  "vendors": [],
+  "exports": []
+}

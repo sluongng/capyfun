@@ -573,7 +573,14 @@ fn run_import(args: ImportArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let outcome = capyfun::engine::import(&repo, &import.dest, origin_tip, branch_tip, &patches)?;
+    let outcome = capyfun::engine::import(
+        &repo,
+        &import.dest,
+        origin_tip,
+        branch_tip,
+        &import.transforms,
+        &patches,
+    )?;
 
     match outcome.head {
         Some(head) if Some(head) != branch_tip => {

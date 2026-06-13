@@ -1,0 +1,16 @@
+github_import(
+    name = "widget",
+    repo = "acme/widget",
+    ref = "refs/heads/main",
+    transforms = [
+        replace(before = "acme.internal/", after = "", paths = ["**/*.go"]),
+        move(src = "pkg", dst = "lib"),
+        copy(src = "VERSION", dst = "lib/VERSION"),
+        rewrite_message(
+            before = "WIP: ",
+            after = "",
+            strip_trailers = ["Internal-Review"],
+            add_trailers = ["Imported-by: capyfun"],
+        ),
+    ],
+)
