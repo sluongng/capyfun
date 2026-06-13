@@ -12,14 +12,16 @@ first slice (the poll reconciler) is spec'd concretely at the end.
 > / `pin changed` / `uninitialized`), and `capyfun reconcile [//target]` runs the
 > idempotent import/vendor/export needed to converge — both built on the engine
 > commit map, both covered by `tests/reconcile_test.rs` against local origins.
-> `capyfun serve` implements the event *plumbing*: it builds the per-monorepo
+> `capyfun serve` closes the event loop: it builds the per-monorepo
 > `repo → targets` index from the IR, polls GH Archive on a schedule (`--once` for
 > a single cycle), and hosts the HTTP endpoint (`GET /healthz`, `POST /webhook`)
-> that parses GitHub push payloads into the same trigger model. Today a matched
-> event is *reported* as a [`Trigger`]; **wiring `serve` to call `reconcile` on a
-> trigger**, webhook **HMAC verification**, and **pin-bump PRs** (proposing a new
-> upstream pin on a release, vs. reconciling to the declared pin) are the next
-> steps.
+> that parses GitHub push payloads into the same trigger model — and a matched
+> [`Trigger`] now drives an idempotent reconcile of the affected target(s) (the
+> `ReconcileActor`, ref-writes serialized so the poll loop and webhook handler do
+> not race). Remaining next steps: webhook **HMAC verification**, **pin-bump PRs**
+> (proposing a new upstream pin on a release, vs. reconciling to the declared
+> pin), and per-target output refs (`refs/capyfun/<label>` + a monorepo PR) so
+> reconciles do not write the default branch directly.
 
 ## Thesis: level-triggered, events are hints
 
