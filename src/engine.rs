@@ -5,10 +5,15 @@
 //! I/O.
 
 use anyhow::{Context, Result};
-use git2::{Oid, Repository, Tree};
+use git2::{Commit, Oid, Repository, Tree};
 
 /// Git filemode for a tree (subdirectory) entry.
 const FILEMODE_TREE: i32 = 0o040000;
+
+/// Commit-message trailer recording the origin commit a mirror commit reflects.
+/// This trailer is the durable commit map: greppable, clone-surviving, and the
+/// basis for incremental import.
+pub const ORIGIN_TRAILER: &str = "CapyFun-Origin";
 
 /// The empty tree object in `repo` (creating it if absent).
 pub fn empty_tree(repo: &Repository) -> Result<Oid> {
@@ -56,6 +61,69 @@ fn splice_into(
     let mut builder = repo.treebuilder(base)?;
     builder.insert(head, new_child, FILEMODE_TREE)?;
     Ok(builder.write()?)
+}
+
+/// Append a `CapyFun-Origin: <sha>` trailer to a commit message.
+fn with_origin_trailer(message: &str, origin: Oid) -> String {
+    let body = message.trim_end();
+    if body.is_empty() {
+        format!("{ORIGIN_TRAILER}: {origin}\n")
+    } else {
+        format!("{body}\n\n{ORIGIN_TRAILER}: {origin}\n")
+    }
+}
+
+/// Extract the origin SHA from a mirror commit's `CapyFun-Origin` trailer.
+pub fn parse_origin_trailer(message: &str) -> Option<String> {
+    let prefix = format!("{ORIGIN_TRAILER}: ");
+    message.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(|s| s.trim().to_owned())
+    })
+}
+
+/// Replay a single origin commit as a mirror commit onto `parent`.
+///
+/// The origin commit's tree is spliced under `dest` into the parent's tree (or
+/// the empty tree when there is no parent), author/committer/message are
+/// preserved, and a [`ORIGIN_TRAILER`] is appended. Returns the new commit OID;
+/// it does not move any ref.
+pub fn replay_commit(
+    repo: &Repository,
+    dest: &str,
+    origin: Oid,
+    parent: Option<Oid>,
+) -> Result<Oid> {
+    let origin_commit = repo
+        .find_commit(origin)
+        .with_context(|| format!("origin commit {origin} not found"))?;
+    let origin_tree = origin_commit.tree()?.id();
+
+    let base_tree = match parent {
+        Some(p) => repo.find_commit(p)?.tree()?.id(),
+        None => empty_tree(repo)?,
+    };
+    let new_tree_oid = splice_tree(repo, base_tree, dest, origin_tree)?;
+    let new_tree = repo.find_tree(new_tree_oid)?;
+
+    let message = with_origin_trailer(origin_commit.message().unwrap_or(""), origin);
+
+    let parent_commit: Option<Commit> = match parent {
+        Some(p) => Some(repo.find_commit(p)?),
+        None => None,
+    };
+    let parents: Vec<&Commit> = parent_commit.iter().collect();
+
+    let oid = repo.commit(
+        None,
+        &origin_commit.author(),
+        &origin_commit.committer(),
+        &message,
+        &new_tree,
+        &parents,
+    )?;
+    Ok(oid)
 }
 
 #[cfg(test)]
