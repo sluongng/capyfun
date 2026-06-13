@@ -1310,7 +1310,7 @@ fn export_strips_prefix_and_capyfun_metadata() {
     );
     let mono = commit(&repo, tree, "add sdk\n", &[]);
 
-    let outcome = export(&repo, "sdk/go", mono, None).unwrap();
+    let outcome = export(&repo, "sdk/go", mono, None, &[]).unwrap();
     let head = outcome.head.expect("one commit");
     assert_eq!(outcome.exported, 1);
 
@@ -1345,7 +1345,7 @@ fn export_is_incremental_and_idempotent() {
     let c2 = commit(&repo, t2, "unrelated change\n", &[c1]);
 
     // First export from scratch: only c1 changed `sdk`, so one dest commit.
-    let first = export(&repo, "sdk", c2, None).unwrap();
+    let first = export(&repo, "sdk", c2, None, &[]).unwrap();
     let dest_tip = first.head.expect("a commit");
     assert_eq!(first.exported, 1, "commit not touching `sdk` is skipped");
     assert_eq!(
@@ -1356,7 +1356,7 @@ fn export_is_incremental_and_idempotent() {
     );
 
     // Re-export with the dest carrying the commit map: a no-op.
-    let again = export(&repo, "sdk", c2, Some(dest_tip)).unwrap();
+    let again = export(&repo, "sdk", c2, Some(dest_tip), &[]).unwrap();
     assert_eq!(again.exported, 0);
     assert_eq!(again.head, Some(dest_tip));
 
@@ -1366,7 +1366,7 @@ fn export_is_incremental_and_idempotent() {
         &[("sdk/SRC", "github_export(...)"), ("sdk/a.txt", "v2"), ("elsewhere.txt", "x")],
     );
     let c3 = commit(&repo, t3, "bump a\n", &[c2]);
-    let delta = export(&repo, "sdk", c3, Some(dest_tip)).unwrap();
+    let delta = export(&repo, "sdk", c3, Some(dest_tip), &[]).unwrap();
     let new_tip = delta.head.expect("a commit");
     assert_eq!(delta.exported, 1);
     assert_eq!(repo.find_commit(new_tip).unwrap().parent_id(0).unwrap(), dest_tip);
@@ -1387,8 +1387,8 @@ fn export_preserves_author_and_is_deterministic() {
     let tree = write_tree(&repo, &[("sdk/SRC", "x"), ("sdk/a.txt", "hi")]);
     let mono = commit(&repo, tree, "msg\n", &[]);
 
-    let a = export(&repo, "sdk", mono, None).unwrap().head.unwrap();
-    let b = export(&repo, "sdk", mono, None).unwrap().head.unwrap();
+    let a = export(&repo, "sdk", mono, None, &[]).unwrap().head.unwrap();
+    let b = export(&repo, "sdk", mono, None, &[]).unwrap().head.unwrap();
     // Deterministic: same inputs -> same dest commit OID.
     assert_eq!(a, b);
     // Authorship is preserved from the monorepo commit.
@@ -1396,4 +1396,56 @@ fn export_preserves_author_and_is_deterministic() {
     let ec = repo.find_commit(a).unwrap();
     assert_eq!(ec.author().name(), mc.author().name());
     assert_eq!(ec.committer().name(), mc.committer().name());
+}
+
+#[test]
+fn export_scrubs_internal_and_uncomments_oss_lines() {
+    let (_d, repo) = temp_repo();
+    // An internal source file with both Copybara-style markers: an internal-only
+    // line (deleted on export) and a commented OSS-only line (uncommented).
+    let src = "package client\n\
+        \n\
+        const BaseURL = \"https://control.internal.acme.corp\" // @--internal only--\n\
+        // const BaseURL = \"https://api.acme.dev\" // @--OSS only--\n\
+        \n\
+        func Hello() string { return \"hi\" }\n";
+    let tree = write_tree(
+        &repo,
+        &[("sdk/SRC", "github_export(...)"), ("sdk/client.go", src)],
+    );
+    let mono = commit(&repo, tree, "add client\n", &[]);
+
+    let transforms = vec![
+        // Delete any line tagged @--internal only--.
+        Transform::Replace {
+            before: r"(?m)^.*@--internal only--.*\n".into(),
+            after: String::new(),
+            paths: vec!["**/*.go".into()],
+            regex: true,
+        },
+        // Uncomment any line tagged @--OSS only--, preserving indentation.
+        Transform::Replace {
+            before: r"(?m)^(\s*)// (.*?) // @--OSS only--$".into(),
+            after: "${1}${2}".into(),
+            paths: vec!["**/*.go".into()],
+            regex: true,
+        },
+    ];
+
+    let head = export(&repo, "sdk", mono, None, &transforms)
+        .unwrap()
+        .head
+        .unwrap();
+    let out = read_tree(&repo, repo.find_commit(head).unwrap().tree().unwrap().id());
+    let go = out.get("client.go").expect("client.go shipped");
+
+    // The internal endpoint and all markers are gone; the OSS endpoint is live.
+    assert!(!go.contains("internal.acme.corp"), "internal line removed: {go}");
+    assert!(!go.contains("@--"), "markers scrubbed: {go}");
+    assert!(
+        go.contains("const BaseURL = \"https://api.acme.dev\""),
+        "oss line uncommented: {go}"
+    );
+    // Exactly one BaseURL definition survives — the OSS one.
+    assert_eq!(go.matches("const BaseURL").count(), 1, "one definition: {go}");
 }

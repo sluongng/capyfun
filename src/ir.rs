@@ -75,6 +75,11 @@ pub struct Export {
     pub branch: String,
     /// Monorepo-root-relative source directory to export.
     pub from: String,
+    /// Validated structural transform pipeline applied to the exported subtree
+    /// before it ships (e.g. scrubbing internal-only lines). Subtree-relative,
+    /// in source order. Only mirror-phase transforms are valid on export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<Transform>,
 }
 
 /// An agent harness runtime (`harness`).
@@ -277,6 +282,20 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                         "{label}: export sources the monorepo root; declare it in a sub-package or set `from_path`"
                     ));
                 }
+                let transforms = lower_transforms(&label, dir, &d.transforms, &mut errors);
+                // Tip-phase transforms (`apply_patch`, `agent_transform`) are an
+                // import-only local-modification layer; they have no meaning when
+                // projecting a path out. Reject them so a misplaced one is loud.
+                for t in &transforms {
+                    if t.phase() == Phase::Tip {
+                        errors.push(format!(
+                            "{label}: transform `{}` is not valid on export (only structural \
+                             transforms — replace/move/copy/rewrite_message — apply when \
+                             exporting)",
+                            t.kind()
+                        ));
+                    }
+                }
                 exports.push(Export {
                     label,
                     name: d.name.clone(),
@@ -284,6 +303,7 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                     repo: d.repo.clone(),
                     branch: d.branch.clone(),
                     from,
+                    transforms,
                 });
             }
             Decl::Harness(d) => {

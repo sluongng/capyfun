@@ -52,6 +52,34 @@ CapyFun does not model sync as one symmetric pipe (see `../../CLAUDE.md`):
 On a re-export, the commit map makes it incremental and idempotent: with nothing
 new it is a no-op; after a merge, only the delta ships.
 
+## Scrubbing on export (`transforms`)
+
+An export can carry `transforms` — the same closed, typed vocabulary used on
+import (`replace`/`move`/`copy`/`rewrite_message`; the tip-phase `apply_patch`/
+`agent_transform` are import-only and rejected on export). They rewrite the
+exported subtree before it ships, so the destination only ever sees the scrubbed,
+OSS-shaped source. This example implements the classic Copybara visibility
+markers with two `replace`s (see `sdk/go/SRC`):
+
+- `@--internal only--` — delete the whole line (acme-private, never ships).
+- `@--OSS only--` — uncomment the line (commented internally, live in OSS).
+
+So the internal source in `sdk/go/client/client.go`:
+
+```go
+const BaseURL = "https://control.internal.acme.corp" // @--internal only--
+// const BaseURL = "https://api.acme.dev" // @--OSS only--
+```
+
+exports as:
+
+```go
+const BaseURL = "https://api.acme.dev"
+```
+
+(Don't write the literal marker tokens in prose comments inside exported source —
+the `@--internal only--` rule would delete those comment lines too.)
+
 ## Run it (hermetic)
 
 The end-to-end flow against a local stand-in destination (no network, no forge)

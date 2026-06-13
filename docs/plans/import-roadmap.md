@@ -157,6 +157,12 @@ round-trip (M3–M5) works.
   (`gh` shell-out); never push to the destination default branch directly. PR
   creation is skipped (the `gh` command printed) for a local destination
   (`CAPYFUN_GITHUB_BASE`) or `--no-pr`, so demos/tests stay hermetic.
+- `github_export` accepts `transforms = [...]` from the same closed vocabulary as
+  import; structural transforms (`replace`/`move`/`copy`/`rewrite_message`)
+  rewrite the exported subtree before it ships (e.g. the Copybara visibility
+  markers: delete `@--internal only--` lines, uncomment `@--OSS only--` lines).
+  Tip-phase transforms (`apply_patch`/`agent_transform`) are import-only and
+  rejected on export at validation.
 - `scripts/smoke-export.sh` builds a local destination + monorepo from scratch,
   runs an export, asserts the prefix-stripped branch + commit-map trailer landed,
   simulates a merge, and checks re-export is a no-op and a delta ships. Mirrors

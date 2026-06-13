@@ -1,0 +1,38 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "github_export",
+      "name": "go-sdk",
+      "from_path": "client",
+      "repo": "acme/sdk-go",
+      "branch": "main",
+      "transforms": [
+        {
+          "transform": "replace",
+          "before": "(?m)^.*@--internal only--.*\\n",
+          "after": "",
+          "paths": [
+            "**/*.go"
+          ],
+          "regex": true
+        },
+        {
+          "transform": "replace",
+          "before": "(?m)^(\\s*)// (.*?) // @--OSS only--$",
+          "after": "${1}${2}",
+          "paths": [
+            "**/*.go"
+          ],
+          "regex": true
+        }
+      ],
+      "package": "//sdk/go"
+    }
+  ]
+}

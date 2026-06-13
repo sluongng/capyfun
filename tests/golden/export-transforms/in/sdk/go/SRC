@@ -1,0 +1,20 @@
+github_export(
+    name = "go-sdk",
+    repo = "acme/sdk-go",
+    branch = "main",
+    from_path = "client",
+    transforms = [
+        replace(
+            before = r"(?m)^.*@--internal only--.*\n",
+            after = "",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+        replace(
+            before = r"(?m)^(\s*)// (.*?) // @--OSS only--$",
+            after = "${1}${2}",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+    ],
+)

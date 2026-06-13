@@ -506,8 +506,13 @@ fn run_config(args: ConfigArgs) -> Result<()> {
             capyfun::config::Decl::Export(e) => {
                 let from = e.from_path.as_deref().unwrap_or("<package>");
                 println!(
-                    "{}:{}  github_export repo={} branch={} from={}",
-                    e.package, e.name, e.repo, e.branch, from
+                    "{}:{}  github_export repo={} branch={} from={} transforms={}",
+                    e.package,
+                    e.name,
+                    e.repo,
+                    e.branch,
+                    from,
+                    e.transforms.len()
                 );
             }
             capyfun::config::Decl::GitRepo(g) => {
@@ -807,7 +812,8 @@ fn run_export(args: ExportArgs) -> Result<()> {
     let dest_tip =
         capyfun::engine::fetch_commit(&repo, &url, &format!("refs/heads/{}", export.branch)).ok();
 
-    let outcome = capyfun::engine::export(&repo, &export.from, mono_tip, dest_tip)?;
+    let outcome =
+        capyfun::engine::export(&repo, &export.from, mono_tip, dest_tip, &export.transforms)?;
 
     match outcome.head {
         Some(head) if Some(head) != dest_tip => {

@@ -521,17 +521,20 @@ pub struct ExportOutcome {
 /// the inverse of [`import_mirror`].
 ///
 /// Every monorepo commit newer than the last-exported one (read from `dest_tip`'s
-/// trailers) is replayed onto `dest_tip` with the `from` prefix stripped and
-/// CapyFun metadata removed ([`strip_capyfun_metadata_for_export`]),
-/// author/committer/message preserved, and an [`EXPORT_TRAILER`] appended.
-/// Commits that do not change the exported content are skipped, so the result is
-/// a clean changeset for one PR. Re-running with nothing new is a no-op. Returns
-/// the new branch tip; the caller pushes it and opens the PR.
+/// trailers) is replayed onto `dest_tip` with the `from` prefix stripped, the
+/// structural `transforms` applied (e.g. scrubbing internal-only lines), CapyFun
+/// metadata removed ([`strip_capyfun_metadata_for_export`]), author/committer
+/// preserved, the message rewritten by any `rewrite_message` transforms, and an
+/// [`EXPORT_TRAILER`] appended. Commits that do not change the exported content
+/// (after transforms) are skipped, so the result is a clean changeset for one
+/// PR. Re-running with nothing new is a no-op. Returns the new branch tip; the
+/// caller pushes it and opens the PR.
 pub fn export(
     repo: &Repository,
     from: &str,
     mono_tip: Oid,
     dest_tip: Option<Oid>,
+    transforms: &[Transform],
 ) -> Result<ExportOutcome> {
     let last = last_exported(repo, dest_tip)?;
     if Some(mono_tip) == last {
@@ -554,14 +557,21 @@ pub fn export(
             // `from` does not exist at this commit (created later): nothing to ship.
             continue;
         };
-        let shipped = strip_capyfun_metadata_for_export(repo, sub)?;
+        // Apply structural transforms (replace/move/copy) to the exported subtree
+        // — e.g. strip `@--internal only--` lines, uncomment `@--OSS only--` — so
+        // the destination only ever sees the scrubbed, OSS-shaped source.
+        let transformed = apply_structural_tree_transforms(repo, sub, transforms)
+            .with_context(|| format!("applying export transforms to commit {mono}"))?;
+        let shipped = strip_capyfun_metadata_for_export(repo, transformed)?;
         if Some(shipped) == prev_tree {
             // This monorepo commit left the exported content untouched: skip it,
             // so the PR holds only commits that change the destination.
             continue;
         }
         let tree = repo.find_tree(shipped)?;
-        let message = with_export_trailer(mono_commit.message().unwrap_or(""), *mono);
+        let rewritten = apply_message_transforms(mono_commit.message().unwrap_or(""), transforms)
+            .with_context(|| format!("rewriting message of commit {mono}"))?;
+        let message = with_export_trailer(&rewritten, *mono);
         let parent_commit: Option<Commit> = match head {
             Some(h) => Some(repo.find_commit(h)?),
             None => None,

@@ -5,10 +5,39 @@
 # own root. CapyFun's own `SRC` marker is never exported. The export opens a PR
 # against `branch` rather than pushing to it directly — the destination side
 # reviews and merges.
+#
+# `transforms` scrub the source on the way out (a closed, typed vocabulary — the
+# same value constructors used on import). Here two `replace`s implement the
+# classic Copybara visibility markers:
+#
+#   - `@--internal only--`: delete the whole line (acme-private, never ships).
+#   - `@--OSS only--`: uncomment the line (commented internally, live in OSS).
+#
+# So this internal source:
+#     const BaseURL = "https://control.internal.acme.corp" // @--internal only--
+#     // const BaseURL = "https://api.acme.dev" // @--OSS only--
+# exports as:
+#     const BaseURL = "https://api.acme.dev"
 
 github_export(
     name = "go-sdk",
     repo = "acme/sdk-go",      # GitHub "owner/name" of the destination
     branch = "main",           # branch the PR targets
     from_path = "client",      # publish sdk/go/client/** at the dest root
+    transforms = [
+        # Drop every line tagged @--internal only--.
+        replace(
+            before = r"(?m)^.*@--internal only--.*\n",
+            after = "",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+        # Uncomment every line tagged @--OSS only--, keeping its indentation.
+        replace(
+            before = r"(?m)^(\s*)// (.*?) // @--OSS only--$",
+            after = "${1}${2}",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+    ],
 )

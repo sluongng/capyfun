@@ -3,10 +3,28 @@
 # The import/vendor rules above bring third-party code *in*; this is the other
 # direction — `capyfun export` ships sdk/go/client/** to github.com/acme/sdk-go
 # as a PR, with the `client/` prefix stripped so the SDK sits at the dest root.
+#
+# `transforms` scrub the source on the way out, the classic Copybara markers:
+#   - @--internal only-- lines are deleted (acme-private, never ship).
+#   - @--OSS only-- lines are uncommented (commented internally, live in OSS).
 
 github_export(
     name = "go-sdk",
     repo = "acme/sdk-go",
     branch = "main",
     from_path = "client",
+    transforms = [
+        replace(
+            before = r"(?m)^.*@--internal only--.*\n",
+            after = "",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+        replace(
+            before = r"(?m)^(\s*)// (.*?) // @--OSS only--$",
+            after = "${1}${2}",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+    ],
 )

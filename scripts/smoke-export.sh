@@ -48,9 +48,32 @@ github_export(
     repo = "acme/sdk-go",
     branch = "main",
     from_path = "client",
+    transforms = [
+        # Drop every line tagged @--internal only-- (acme-private).
+        replace(
+            before = r"(?m)^.*@--internal only--.*\n",
+            after = "",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+        # Uncomment every line tagged @--OSS only-- (live in OSS).
+        replace(
+            before = r"(?m)^(\s*)// (.*?) // @--OSS only--$",
+            after = "${1}${2}",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+    ],
 )
 EOF
-printf 'package client\n\nconst V = 1\n' > "$mono/sdk/go/client/client.go"
+cat > "$mono/sdk/go/client/client.go" <<'EOF'
+package client
+
+const V = 1
+
+const BaseURL = "https://control.internal.acme.corp" // @--internal only--
+// const BaseURL = "https://api.acme.dev" // @--OSS only--
+EOF
 printf 'module acme/sdk-go\n' > "$mono/sdk/go/client/go.mod"
 git -C "$mono" add -A
 git -C "$mono" commit -qm "add go sdk client"
@@ -68,6 +91,11 @@ show "$eb" go.mod | grep -q "module acme/sdk-go"    || fail "exported go.mod mis
 git -C "$dest" show "$eb:SRC" >/dev/null 2>&1        && fail "CapyFun SRC must not be exported"
 git -C "$dest" show "$eb:client" >/dev/null 2>&1     && fail "the from prefix must be stripped"
 git -C "$dest" log "$eb" --format=%B | grep -q "CapyFun-Export" || fail "export trailer missing"
+# Visibility markers were scrubbed on export.
+show "$eb" client.go | grep -q "@--"                      && fail "markers not scrubbed"
+show "$eb" client.go | grep -q "internal.acme.corp"       && fail "internal-only line not deleted"
+show "$eb" client.go | grep -q 'BaseURL = "https://api.acme.dev"' || fail "OSS-only line not uncommented"
+echo "scrubbed export:"; show "$eb" client.go | sed 's/^/  /'
 
 # --- simulate the PR being merged: fast-forward main to the export tip ---
 git -C "$dest" update-ref refs/heads/main "$(branch_tip "$eb")"

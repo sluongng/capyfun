@@ -122,6 +122,12 @@ pub struct ExportDecl {
     pub repo: String,
     /// Destination branch the PR targets.
     pub branch: String,
+    /// Ordered transform pipeline (from `transforms = [...]`), in source order.
+    /// On export only structural transforms apply (`replace`/`move`/`copy`/
+    /// `rewrite_message`); they rewrite the exported subtree before it ships
+    /// (e.g. scrubbing internal-only lines). Empty when none are declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transforms: Vec<TransformSpec>,
     pub package: String,
 }
 
@@ -469,15 +475,23 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] repo: String,
         #[starlark(require = named, default = "main")] branch: &str,
         #[starlark(require = named)] from_path: Option<String>,
+        #[starlark(require = named, default = UnpackList::default())] transforms: UnpackList<Value>,
         eval: &mut Evaluator,
     ) -> anyhow::Result<NoneType> {
         let s = state(eval)?;
         let package = s.package.clone();
+        let transforms = transforms
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| TransformValue::unpack(v, i))
+            .collect::<Result<Vec<_>>>()?;
         s.record(Decl::Export(ExportDecl {
             name,
             from_path,
             repo,
             branch: branch.to_owned(),
+            transforms,
             package,
         }))?;
         Ok(NoneType)

@@ -356,11 +356,51 @@ fn export_lowers_source_path() {
         from_path: Some("go".into()),
         repo: "acme/sdk-go".into(),
         branch: "main".into(),
+        transforms: Vec::new(),
         package: "//sdk".into(),
     };
     let ir = compile_decls(vec![mono("//"), Decl::Export(exp)]).unwrap();
     assert_eq!(ir.exports[0].from, "sdk/go");
     assert_eq!(ir.exports[0].label, "//sdk:sdk");
+}
+
+#[test]
+fn export_rejects_tip_phase_transforms() {
+    let exp = ExportDecl {
+        name: "sdk".into(),
+        from_path: Some("go".into()),
+        repo: "acme/sdk-go".into(),
+        branch: "main".into(),
+        transforms: vec![TransformSpec::ApplyPatch {
+            file: "fix.patch".into(),
+        }],
+        package: "//sdk".into(),
+    };
+    let errs = compile_decls(vec![mono("//"), Decl::Export(exp)]).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("not valid on export") && e.contains("apply_patch")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn export_lowers_structural_transforms() {
+    let exp = ExportDecl {
+        name: "sdk".into(),
+        from_path: Some("go".into()),
+        repo: "acme/sdk-go".into(),
+        branch: "main".into(),
+        transforms: vec![TransformSpec::Replace {
+            before: "x".into(),
+            after: "y".into(),
+            paths: vec!["**/*.go".into()],
+            regex: false,
+        }],
+        package: "//sdk".into(),
+    };
+    let ir = compile_decls(vec![mono("//"), Decl::Export(exp)]).unwrap();
+    assert_eq!(ir.exports[0].transforms.len(), 1);
 }
 
 #[test]

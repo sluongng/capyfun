@@ -74,6 +74,8 @@ git clone -q --bare "$seed" "$dest"
 CAPYFUN_GITHUB_BASE="$dests" "$bin" export //sdk/go:go-sdk --no-pr --root "$work"
 echo "exported tree on the destination (client/ prefix stripped, no SRC):"
 git -C "$dest" ls-tree -r --name-only capyfun/export-go-sdk | sed 's/^/  /'
+echo "scrubbed client.go (internal-only deleted, OSS-only uncommented):"
+git -C "$dest" show capyfun/export-go-sdk:client.go | sed 's/^/  /'
 
 echo
 echo "==> result"

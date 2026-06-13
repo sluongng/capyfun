@@ -210,3 +210,81 @@ fn end_to_end_export_to_pr_branch() {
         "delta export must build on the merged destination tip"
     );
 }
+
+#[test]
+fn end_to_end_export_scrubs_visibility_markers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dests = tmp.path().join("dests");
+    let dest_path = dests.join("acme/sdk-go");
+    let mono_path = tmp.path().join("mono");
+
+    let dest = Repository::init_bare(&dest_path).unwrap();
+    commit_bare(&dest, &[("README.md", "# acme sdk-go\n")], "initial\n");
+
+    // The export rule scrubs the source on the way out (raw-string regexes, as a
+    // real SRC would write them): delete @--internal only-- lines, uncomment
+    // @--OSS only-- lines.
+    let src = r#"github_export(
+    name = "go-sdk",
+    repo = "acme/sdk-go",
+    branch = "main",
+    from_path = "client",
+    transforms = [
+        replace(
+            before = r"(?m)^.*@--internal only--.*\n",
+            after = "",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+        replace(
+            before = r"(?m)^(\s*)// (.*?) // @--OSS only--$",
+            after = "${1}${2}",
+            paths = ["**/*.go"],
+            regex = True,
+        ),
+    ],
+)
+"#;
+    let client = "package client\n\
+        \n\
+        const BaseURL = \"https://control.internal.acme.corp\" // @--internal only--\n\
+        // const BaseURL = \"https://api.acme.dev\" // @--OSS only--\n";
+
+    let mono = init_main(&mono_path);
+    commit_files(
+        &mono,
+        &[
+            ("SRC", "monorepo(name = \"acme\", default_branch = \"main\")\n"),
+            ("sdk/go/SRC", src),
+            ("sdk/go/client/client.go", client),
+        ],
+        "add go sdk client with visibility markers\n",
+    );
+
+    let out = run_export(&mono_path, &dests, "//sdk/go:go-sdk");
+    assert!(
+        out.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let export_tip = branch_tip(&dest, "capyfun/export-go-sdk");
+    let shipped = show(&dest, export_tip, "client.go");
+    assert!(
+        !shipped.contains("internal.acme.corp"),
+        "internal-only line must be deleted: {shipped}"
+    );
+    assert!(
+        !shipped.contains("@--"),
+        "all visibility markers must be scrubbed: {shipped}"
+    );
+    assert!(
+        shipped.contains("const BaseURL = \"https://api.acme.dev\""),
+        "OSS-only line must be uncommented: {shipped}"
+    );
+    assert_eq!(
+        shipped.matches("const BaseURL").count(),
+        1,
+        "exactly one BaseURL definition should survive: {shipped}"
+    );
+}

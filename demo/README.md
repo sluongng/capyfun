@@ -55,10 +55,12 @@ from each ecosystem's manifest; `check` validates the whole tree to IR; then
 `import` pulls the Go deps with history and `vendor` pins the Rust/JS snapshots.
 Finally `export` ships `sdk/go/client/` out to a local stand-in destination
 (`acme/sdk-go`) as a branch + PR — the `client/` prefix stripped so the SDK sits
-at the destination root. The destination is a local bare repo so the demo stays
-hermetic; against a real GitHub remote, export opens the PR via the `gh` CLI. See
-`examples/export/` for the export config on its own and `scripts/smoke-export.sh`
-for the standalone hermetic export proof.
+at the destination root, and `transforms` scrub the source on the way out
+(`@--internal only--` lines deleted, `@--OSS only--` lines uncommented — the
+classic Copybara visibility markers). The destination is a local bare repo so the
+demo stays hermetic; against a real GitHub remote, export opens the PR via the
+`gh` CLI. See `examples/export/` for the export config on its own and
+`scripts/smoke-export.sh` for the standalone hermetic export proof.
 
 The three generators differ in how much they can resolve offline. A Go module
 path *is* its GitHub slug and its version *is* a tag, so `gen-go` is pure (no
