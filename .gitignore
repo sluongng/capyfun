@@ -9,3 +9,6 @@ secrets.env
 
 # Claude Code worktrees/session state
 .claude/
+
+# Project instructions, kept local only (purged from history).
+CLAUDE.md
