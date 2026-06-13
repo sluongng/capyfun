@@ -15,4 +15,5 @@ pub mod config;
 pub mod engine;
 pub mod gomod;
 pub mod ir;
+pub mod server;
 pub mod validate;

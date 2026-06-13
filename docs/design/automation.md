@@ -7,6 +7,14 @@ affected targets. It builds on the import/vendor/export engine and the commit ma
 Read `../../CLAUDE.md` first. This is a design/roadmap artifact; the buildable
 first slice (the poll reconciler) is spec'd concretely at the end.
 
+> **Status:** `capyfun serve` implements the event *plumbing*: it builds the
+> per-monorepo `repo → targets` index from the IR, polls GH Archive on a schedule
+> (`--once` for a single cycle), and hosts the HTTP endpoint (`GET /healthz`,
+> `POST /webhook`) that parses GitHub push payloads into the same trigger model.
+> Today a matched event is *reported* as a [`Trigger`]; **acting** on it
+> (`capyfun reconcile` — fetch, import/vendor, open a PR) and webhook **HMAC
+> verification** are the next steps.
+
 ## Thesis: level-triggered, events are hints
 
 CapyFun does **not** map an event directly to an action. An event wakes a

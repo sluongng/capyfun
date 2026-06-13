@@ -27,6 +27,24 @@ enum Command {
     Vendor(ImportArgs),
     /// Publish a monorepo path to a destination remote as a GitHub PR.
     Export(ExportArgs),
+    /// Run the automation server: poll GH Archive and host the webhook endpoint.
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ServeArgs {
+    /// Monorepo root (the directory holding the root `SRC` file).
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Address for the webhook/health HTTP endpoint.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    addr: String,
+    /// Seconds between GH Archive poll cycles.
+    #[arg(long, default_value_t = 3600)]
+    interval_secs: u64,
+    /// Run a single poll cycle and exit (no HTTP server).
+    #[arg(long)]
+    once: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -79,7 +97,20 @@ fn main() -> Result<()> {
         Command::Import(args) => run_import(args),
         Command::Vendor(args) => run_vendor(args),
         Command::Export(args) => run_export(args),
+        Command::Serve(args) => run_serve(args),
     }
+}
+
+fn run_serve(args: ServeArgs) -> Result<()> {
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+    capyfun::server::serve(
+        &ir,
+        &args.addr,
+        std::time::Duration::from_secs(args.interval_secs),
+        args.once,
+    )
 }
 
 fn run_vendor(args: ImportArgs) -> Result<()> {
