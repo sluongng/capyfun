@@ -10,7 +10,9 @@
 //! - [`proto`] — generated REAPI + google bindings.
 //! - [`digest`] — SHA256 REAPI digests and the `Directory` Merkle tree.
 //! - [`action`] — build a `Command` + `Action` and its cache-key digest.
+//! - [`client`] — a blocking REAPI gRPC client (CAS / ActionCache / Execute).
 
 pub mod action;
+pub mod client;
 pub mod digest;
 pub mod proto;
