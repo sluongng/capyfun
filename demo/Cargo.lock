@@ -1,0 +1,22 @@
+# This file is checked in so `capyfun gen-cargo` can pin exact crate versions
+# without invoking the Cargo toolchain. (A real workspace's Cargo.lock works
+# identically; this hand-written subset just records the two demo deps.)
+version = 3
+
+[[package]]
+name = "demo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "thiserror",
+]
+
+[[package]]
+name = "anyhow"
+version = "1.0.86"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "thiserror"
+version = "1.0.61"
+source = "registry+https://github.com/rust-lang/crates.io-index"

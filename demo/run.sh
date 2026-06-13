@@ -5,7 +5,9 @@
 # JS as pinned snapshots (git_repository). A history-preserving alternative to
 # `go mod vendor` / `cargo vendor` / `node_modules`.
 #
-# Requires network access to github.com. Runs in a throwaway temp directory.
+# Requires network access to github.com, crates.io, and registry.npmjs.org
+# (the cargo/npm generators resolve repos + tags online). Runs in a throwaway
+# temp directory.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,8 +27,17 @@ git_c commit -qm "demo manifests + config" >/dev/null
 echo
 echo "==> capyfun gen-go  (go.mod -> third_party/go import rules)"
 "$bin" gen-go --root "$work" --prefix third_party/go
+
+echo
+echo "==> capyfun gen-cargo  (Cargo.toml/Cargo.lock -> third_party/rust snapshots)"
+"$bin" gen-cargo --root "$work"
+
+echo
+echo "==> capyfun gen-npm  (package.json/package-lock.json -> third_party/js snapshots)"
+"$bin" gen-npm --root "$work"
+
 git_c add -A >/dev/null
-git_c commit -qm "regenerate go imports" >/dev/null || true   # idempotent; may be a no-op
+git_c commit -qm "regenerate import/snapshot rules" >/dev/null || true   # idempotent; may be a no-op
 
 echo
 echo "==> capyfun check  (whole tree -> validated IR)"
