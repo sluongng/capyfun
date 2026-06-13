@@ -4,14 +4,33 @@
 # and a `model` (the LLM) are paired into an `agent`. Multiple agents can coexist;
 # models swap under a shared harness, and harnesses are reused across agents.
 #
+# Harness/model compatibility matters: a harness can only drive models it
+# supports. `claude_code` runs Anthropic models; `codex` and `pi` run OpenAI and
+# other open models. CapyFun validates these pairings.
+#
 # Package: //tools/agents
+
+# --- harnesses (runtimes) ---
 
 harness(
     name = "cc",
-    kind = "claude_code",                  # claude_code | codex | pi | ...
+    kind = "claude_code",                  # Anthropic models only
     plugins = ["//tools/plugins:bazel"],   # runfiles (plugin targets, T4+)
-    skills = ["//tools/skills:review"],    # runfiles (skill targets, T4+)
+    skills = ["//tools/skills:review"],     # runfiles (skill targets, T4+)
 )
+
+harness(
+    name = "codex",
+    kind = "codex",                        # OpenAI + open models
+)
+
+harness(
+    name = "pi",
+    kind = "pi",                           # OpenAI + open models
+    skills = ["//tools/skills:review"],
+)
+
+# --- models ---
 
 model(
     name = "opus48",
@@ -25,7 +44,19 @@ model(
     id = "gpt-5.5",
 )
 
-# Pair a harness with a model. Referenced by agent_transform via label, e.g.
-# //tools/agents:reviewer.
+model(
+    name = "nemotron3ultra",
+    provider = "nebius",
+    id = "nvidia/nemotron-3-ultra",
+)
+
+# --- agents (harness + model) ---
+
+# Claude Code drives the Anthropic Opus model.
 agent(name = "reviewer", harness = ":cc", model = ":opus48")
-agent(name = "porter", harness = ":cc", model = ":gpt55")
+
+# GPT-5.5 is an OpenAI model, so it runs under Codex (not Claude Code).
+agent(name = "porter", harness = ":codex", model = ":gpt55")
+
+# Nemotron-3 Ultra (served by Nebius) runs under Pi.
+agent(name = "modernizer", harness = ":pi", model = ":nemotron3ultra")

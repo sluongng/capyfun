@@ -175,6 +175,11 @@ agent(name = "reviewer", harness = ":cc", model = ":opus48")
 - An **agent** pairs a harness with a model. Multiple agents coexist in one repo;
   models swap under a shared harness, harnesses are reused across agents.
 
+Not every harness can drive every model. `claude_code` runs Anthropic models;
+`codex` and `pi` run OpenAI and other open models (e.g. NVIDIA Nemotron served by
+Nebius). An `agent` whose harness cannot drive its model is a validation error.
+See `examples/transforms/tools/agents/SRC` for a worked set.
+
 The agent's identity for caching is `(harness kind, plugins digests, skills
 digests, model provider+id)`.
 
@@ -218,6 +223,8 @@ Hard errors:
 - `agent_transform.agent` does not resolve to an `agent` rule;
 - `template()` path does not resolve, or a referenced var label does not resolve;
 - `harness.kind` / `model.provider` outside the known set; empty `model.id`;
+- an `agent` whose harness cannot drive its model (e.g. `claude_code` paired with
+  an OpenAI model);
 - `move`/`copy`/`replace`/`apply_patch` paths that escape the subtree, are
   absolute, or contain `..`;
 - a structural transform listed where only tip is valid, or vice versa (only
