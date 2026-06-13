@@ -240,6 +240,7 @@ fn run_serve(args: ServeArgs) -> Result<()> {
         .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
     capyfun::server::serve(
         &ir,
+        &args.root,
         &args.addr,
         std::time::Duration::from_secs(args.interval_secs),
         args.once,

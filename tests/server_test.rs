@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use capyfun::ir::{Import, Ir, Monorepo};
-use capyfun::server::{run_http, Index};
+use capyfun::server::{run_http, Actor, Index, ReportOnly};
 
 fn ir_with_uuid_import() -> Ir {
     Ir {
@@ -51,9 +51,10 @@ fn post(url: &str, body: &str) -> (u16, String) {
 #[test]
 fn webhook_and_health_endpoints() {
     let index = Arc::new(Index::from_ir(&ir_with_uuid_import()));
+    let actor: Arc<dyn Actor> = Arc::new(ReportOnly);
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let addr = server.server_addr().to_ip().unwrap();
-    std::thread::spawn(move || run_http(server, index));
+    std::thread::spawn(move || run_http(server, index, actor));
 
     let base = format!("http://{addr}");
 
