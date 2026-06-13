@@ -11,9 +11,12 @@
 //!
 //! Config evaluation is pure; all Git and network I/O lives in [`engine`].
 
+pub mod cargo;
 pub mod config;
 pub mod engine;
 pub mod gomod;
 pub mod ir;
+pub mod npm;
 pub mod server;
 pub mod validate;
+pub mod vendorgen;

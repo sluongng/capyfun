@@ -21,6 +21,10 @@ enum Command {
     Check(ConfigArgs),
     /// Scaffold import SRC files from a Go module's go.mod / go.sum.
     GenGo(GenGoArgs),
+    /// Scaffold git_repository snapshot SRC files from a Cargo.toml / Cargo.lock.
+    GenCargo(GenSnapshotArgs),
+    /// Scaffold a git_repository snapshot SRC from a package.json / package-lock.json.
+    GenNpm(GenSnapshotArgs),
     /// Replay an external repository's commits into a monorepo path.
     Import(ImportArgs),
     /// Vendor a pinned snapshot of a `git_repository` rule into its package.
@@ -71,6 +75,19 @@ struct GenGoArgs {
 }
 
 #[derive(Debug, clap::Args)]
+struct GenSnapshotArgs {
+    /// Monorepo root where SRC files are written.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Path to the manifest (default: <root>/Cargo.toml or <root>/package.json).
+    #[arg(long)]
+    manifest: Option<PathBuf>,
+    /// Third-party prefix for generated packages.
+    #[arg(long)]
+    prefix: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
 struct ImportArgs {
     /// Label of the `github_import` rule to run, e.g. `//third_party/backend:backend`.
     label: String,
@@ -94,6 +111,8 @@ fn main() -> Result<()> {
         Command::Config(args) => run_config(args),
         Command::Check(args) => run_check(args),
         Command::GenGo(args) => run_gen_go(args),
+        Command::GenCargo(args) => run_gen_cargo(args),
+        Command::GenNpm(args) => run_gen_npm(args),
         Command::Import(args) => run_import(args),
         Command::Vendor(args) => run_vendor(args),
         Command::Export(args) => run_export(args),
@@ -212,6 +231,157 @@ fn run_gen_go(args: GenGoArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a planned package to a pinned GitHub snapshot: find its GitHub slug
+/// (from a git source if present, else the registry) and resolve its version tag
+/// to a commit SHA via `ls-remote`. `repo_lookup` queries the ecosystem's
+/// registry for a package's recorded repository URL.
+fn resolve_snapshot(
+    name: &str,
+    version: &str,
+    git_slug: Option<(String, String)>,
+    git_sha: Option<String>,
+    repo_lookup: impl FnOnce(&str) -> Result<Option<String>>,
+) -> Result<capyfun::vendorgen::Vendored> {
+    use capyfun::vendorgen::{ls_remote, parse_github_slug, pick_commit, tag_candidates};
+
+    let (owner, repo) = match git_slug {
+        Some(s) => s,
+        None => {
+            let url = repo_lookup(name)?
+                .ok_or_else(|| anyhow::anyhow!("no repository URL recorded for {name}"))?;
+            parse_github_slug(&url)
+                .ok_or_else(|| anyhow::anyhow!("{name} repository {url} is not on github.com"))?
+        }
+    };
+    let slug = format!("{owner}/{repo}");
+
+    // A git-source lock entry already pins an exact commit; skip the network.
+    if let Some(sha) = git_sha {
+        return Ok(capyfun::vendorgen::Vendored {
+            name: name.to_owned(),
+            slug,
+            version: version.to_owned(),
+            commit: sha,
+            tag: version.to_owned(),
+        });
+    }
+
+    let refs = ls_remote(&slug)?;
+    let (tag, commit) = pick_commit(&refs, &tag_candidates(name, version)).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no tag for {name} {version} found in {slug} (tried {:?})",
+            tag_candidates(name, version)
+        )
+    })?;
+    Ok(capyfun::vendorgen::Vendored {
+        name: name.to_owned(),
+        slug,
+        version: version.to_owned(),
+        commit,
+        tag,
+    })
+}
+
+fn run_gen_cargo(args: GenSnapshotArgs) -> Result<()> {
+    use capyfun::{cargo, vendorgen};
+
+    let prefix = args.prefix.as_deref().unwrap_or("third_party/rust");
+    let manifest_path = args
+        .manifest
+        .unwrap_or_else(|| args.root.join("Cargo.toml"));
+    let content = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let deps = cargo::parse_manifest(&content);
+
+    let lock = std::fs::read_to_string(args.root.join("Cargo.lock"))
+        .ok()
+        .map(|c| cargo::parse_lock(&c))
+        .unwrap_or_default();
+
+    let planned = cargo::plan(&deps, &lock, prefix);
+
+    let mut written = 0;
+    let mut skipped = Vec::new();
+    for p in &planned {
+        let git_slug = cargo::slug_from_git(p);
+        match resolve_snapshot(
+            &p.name,
+            &p.version,
+            git_slug,
+            p.git_sha.clone(),
+            vendorgen::crates_io_repo,
+        ) {
+            Ok(v) => {
+                let dir = args.root.join(&p.package_dir);
+                std::fs::create_dir_all(&dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+                std::fs::write(dir.join("SRC"), cargo::render_src(&v))
+                    .with_context(|| format!("writing {}/SRC", p.package_dir))?;
+                println!("wrote {}/SRC  ({} @ {})", p.package_dir, v.slug, v.tag);
+                written += 1;
+            }
+            Err(e) => skipped.push(format!("{} {} ({e})", p.name, p.version)),
+        }
+    }
+    for s in &skipped {
+        println!("skipped {s}");
+    }
+    println!(
+        "\ngenerated {written} snapshot(s); run `capyfun vendor //<pkg>:<name> --root {}`",
+        args.root.display()
+    );
+    Ok(())
+}
+
+fn run_gen_npm(args: GenSnapshotArgs) -> Result<()> {
+    use capyfun::{npm, vendorgen};
+
+    let prefix = args.prefix.as_deref().unwrap_or("third_party/js");
+    let manifest_path = args
+        .manifest
+        .unwrap_or_else(|| args.root.join("package.json"));
+    let content = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let deps = npm::parse_manifest(&content)?;
+
+    let lock = std::fs::read_to_string(args.root.join("package-lock.json"))
+        .ok()
+        .map(|c| npm::parse_lock(&c))
+        .transpose()?
+        .unwrap_or_default();
+
+    let planned = npm::plan(&deps, &lock);
+
+    let mut resolved = Vec::new();
+    let mut skipped = Vec::new();
+    for p in &planned {
+        match resolve_snapshot(&p.name, &p.version, None, None, vendorgen::npm_repo) {
+            Ok(v) => {
+                println!("resolved {} -> {} @ {}", p.name, v.slug, v.tag);
+                resolved.push((v, p.into.clone()));
+            }
+            Err(e) => skipped.push(format!("{} {} ({e})", p.name, p.version)),
+        }
+    }
+
+    if !resolved.is_empty() {
+        let dir = args.root.join(prefix);
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        std::fs::write(dir.join("SRC"), npm::render_src(&resolved))
+            .with_context(|| format!("writing {prefix}/SRC"))?;
+        println!("wrote {prefix}/SRC  ({} target(s))", resolved.len());
+    }
+    for s in &skipped {
+        println!("skipped {s}");
+    }
+    println!(
+        "\ngenerated {} snapshot target(s); run `capyfun vendor //{prefix}:<name> --root {}`",
+        resolved.len(),
+        args.root.display()
+    );
+    Ok(())
+}
+
 fn run_check(args: ConfigArgs) -> Result<()> {
     let raw = capyfun::config::evaluate(&args.root)?;
     match capyfun::ir::compile(&raw) {
@@ -276,10 +446,7 @@ fn run_config(args: ConfigArgs) -> Result<()> {
 /// local bare repositories in hermetic tests/demos); otherwise the public
 /// GitHub HTTPS URL is used.
 fn origin_url(slug: &str) -> String {
-    match std::env::var("CAPYFUN_GITHUB_BASE") {
-        Ok(base) => format!("{}/{}", base.trim_end_matches('/'), slug),
-        Err(_) => format!("https://github.com/{slug}.git"),
-    }
+    capyfun::vendorgen::github_url(slug)
 }
 
 fn run_import(args: ImportArgs) -> Result<()> {
