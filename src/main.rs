@@ -88,6 +88,31 @@ struct ReconcileArgs {
     /// Push export branches but do not open GitHub PRs (print the `gh` command).
     #[arg(long)]
     no_pr: bool,
+    /// Where `agent_transform`s run: `local` (harness on this machine) or
+    /// `remote` (REAPI/BuildBuddy; configured via the `BUILDBUDDY_*` env vars).
+    #[arg(long, value_enum, default_value_t)]
+    executor: ExecutorArg,
+}
+
+/// CLI choice of where generative transforms execute.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+enum ExecutorArg {
+    #[default]
+    Local,
+    Remote,
+}
+
+impl ExecutorArg {
+    /// Resolve to a reconcile [`Executor`](capyfun::reconcile::Executor), reading
+    /// `BUILDBUDDY_*` from the environment for the remote case.
+    fn resolve(self) -> capyfun::reconcile::Executor {
+        match self {
+            ExecutorArg::Local => capyfun::reconcile::Executor::Local,
+            ExecutorArg::Remote => {
+                capyfun::reconcile::Executor::Remote(capyfun::reconcile::RemoteSettings::from_env())
+            }
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -153,6 +178,10 @@ struct ImportArgs {
     /// re-materialize its patch (ignored by `vendor`).
     #[arg(long)]
     refresh: bool,
+    /// Where `agent_transform`s run: `local` or `remote` (REAPI/BuildBuddy).
+    /// Ignored by `vendor`.
+    #[arg(long, value_enum, default_value_t)]
+    executor: ExecutorArg,
 }
 
 #[derive(Debug, clap::Args)]
@@ -306,9 +335,10 @@ fn run_reconcile(args: ReconcileArgs) -> Result<()> {
     };
 
     use capyfun::reconcile::{do_export, do_import, do_vendor};
+    let executor = args.executor.resolve();
     for i in &ir.imports {
         if target.is_none_or(|t| t == i.label) {
-            run(&i.label, do_import(&repo, &ir, i, &args.root, args.refresh));
+            run(&i.label, do_import(&repo, &ir, i, &args.root, args.refresh, &executor));
         }
     }
     for v in &ir.vendors {
@@ -680,7 +710,14 @@ fn run_import(args: ImportArgs) -> Result<()> {
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
 
-    let summary = capyfun::reconcile::do_import(&repo, &ir, import, &args.root, args.refresh)?;
+    let summary = capyfun::reconcile::do_import(
+        &repo,
+        &ir,
+        import,
+        &args.root,
+        args.refresh,
+        &args.executor.resolve(),
+    )?;
     println!("{}: {summary}", import.label);
     Ok(())
 }

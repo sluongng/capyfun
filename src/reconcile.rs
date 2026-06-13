@@ -15,12 +15,65 @@ use git2::Repository;
 use crate::ir::{Export, Import, Ir, Vendor};
 
 /// Knobs for a reconcile action.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Default)]
 pub struct Options {
     /// Import: bypass the agent-output cache and re-run every `agent_transform`.
     pub refresh: bool,
     /// Export: push the branch but do not open a GitHub PR (print the command).
     pub no_pr: bool,
+    /// Where `agent_transform`s run (local harness vs. REAPI/BuildBuddy).
+    pub executor: Executor,
+}
+
+/// Default container image for remote execution (must contain the agent harness
+/// and `sh`; override with `BUILDBUDDY_EXEC_IMAGE`).
+const DEFAULT_EXEC_IMAGE: &str = "docker://mirror.gcr.io/library/busybox:latest";
+
+/// Where the generative (`agent_transform`) steps of an import run.
+///
+/// Structural transforms, the mirror replay, vendors, and exports are always
+/// local Git work; only the agent harness can be offloaded. With [`Remote`], each
+/// `agent_transform` becomes a REAPI Action on the BuildBuddy pool and repeat
+/// runs are served from the Action Cache (see `docs/design/remote-execution.md`).
+///
+/// [`Remote`]: Executor::Remote
+#[derive(Default)]
+pub enum Executor {
+    /// Run the harness locally (the default; [`crate::engine::LiveRunner`]).
+    #[default]
+    Local,
+    /// Run the harness on a REAPI backend ([`crate::engine::RemoteRunner`]).
+    Remote(RemoteSettings),
+}
+
+/// Connection + placement settings for the remote executor.
+pub struct RemoteSettings {
+    pub config: crate::remote::client::RemoteConfig,
+    /// Platform properties selecting the executor (container image, OS, network).
+    pub platform: Vec<(String, String)>,
+}
+
+impl RemoteSettings {
+    /// Build from the environment: the `BUILDBUDDY_*` connection vars (see
+    /// [`RemoteConfig::from_env`](crate::remote::client::RemoteConfig::from_env))
+    /// plus `BUILDBUDDY_EXEC_IMAGE` for the executor container.
+    pub fn from_env() -> Self {
+        let image =
+            std::env::var("BUILDBUDDY_EXEC_IMAGE").unwrap_or_else(|_| DEFAULT_EXEC_IMAGE.to_owned());
+        RemoteSettings {
+            config: crate::remote::client::RemoteConfig::from_env(),
+            platform: platform_props(&image),
+        }
+    }
+}
+
+/// The platform properties for a Linux executor running `image`. Pure, so the
+/// placement is unit-testable without the environment.
+fn platform_props(image: &str) -> Vec<(String, String)> {
+    vec![
+        ("OSFamily".to_owned(), "Linux".to_owned()),
+        ("container-image".to_owned(), image.to_owned()),
+    ]
 }
 
 /// Resolve a GitHub `owner/name` slug to a fetchable URL (honoring
@@ -40,7 +93,7 @@ pub fn reconcile_label(
     opts: Options,
 ) -> Result<String> {
     if let Some(i) = ir.imports.iter().find(|i| i.label == label) {
-        return do_import(repo, ir, i, root, opts.refresh);
+        return do_import(repo, ir, i, root, opts.refresh, &opts.executor);
     }
     if let Some(v) = ir.vendors.iter().find(|v| v.label == label) {
         return do_vendor(repo, ir, v);
@@ -60,6 +113,7 @@ pub fn do_import(
     import: &Import,
     root: &Path,
     refresh: bool,
+    executor: &Executor,
 ) -> Result<String> {
     // Current tip of the monorepo branch we import onto.
     let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
@@ -88,21 +142,21 @@ pub fn do_import(
     // live here so the engine stays decoupled from `ir`.
     let tips = resolve_tip_transforms(ir, import, root)?;
 
-    let runner = crate::engine::LiveRunner;
-    let tip_layer = crate::engine::TipLayer {
-        patches: &patches,
-        tips: &tips,
-        runner: &runner,
-        refresh,
+    // Select where agent_transforms run. The remote runner borrows a connected
+    // client, so connect inside the match arm and run the import there.
+    let outcome = match executor {
+        Executor::Local => {
+            let runner = crate::engine::LiveRunner;
+            run_import_engine(repo, import, origin_tip, branch_tip, &patches, &tips, refresh, &runner)?
+        }
+        Executor::Remote(settings) => {
+            let client = crate::remote::client::RemoteClient::connect(&settings.config)
+                .context("connecting to the remote executor")?;
+            let runner =
+                crate::engine::RemoteRunner::new(&client).with_platform(settings.platform.clone());
+            run_import_engine(repo, import, origin_tip, branch_tip, &patches, &tips, refresh, &runner)?
+        }
     };
-    let outcome = crate::engine::import(
-        repo,
-        &import.dest,
-        origin_tip,
-        branch_tip,
-        &import.transforms,
-        &tip_layer,
-    )?;
 
     match outcome.head {
         Some(head) if Some(head) != branch_tip => {
@@ -126,6 +180,37 @@ pub fn do_import(
         }
         _ => Ok("already up to date".to_owned()),
     }
+}
+
+/// Drive the engine import with a chosen [`AgentRunner`](crate::engine::AgentRunner)
+/// (local or remote). Splitting this out lets `do_import` select the runner —
+/// whose lifetime is tied to a connected client — without duplicating the import
+/// body.
+#[allow(clippy::too_many_arguments)]
+fn run_import_engine(
+    repo: &Repository,
+    import: &Import,
+    origin_tip: git2::Oid,
+    branch_tip: Option<git2::Oid>,
+    patches: &[crate::engine::PatchFile],
+    tips: &[crate::engine::TipTransform],
+    refresh: bool,
+    runner: &dyn crate::engine::AgentRunner,
+) -> Result<crate::engine::FullImportOutcome> {
+    let tip_layer = crate::engine::TipLayer {
+        patches,
+        tips,
+        runner,
+        refresh,
+    };
+    crate::engine::import(
+        repo,
+        &import.dest,
+        origin_tip,
+        branch_tip,
+        &import.transforms,
+        &tip_layer,
+    )
 }
 
 /// Vendor one pinned snapshot: fetch the declared commit and (re)materialize its
@@ -347,4 +432,42 @@ fn open_pr(export: &Export, branch: &str, no_pr: bool) -> Result<()> {
     }
     println!("opened PR: {} <- {} on {}", export.branch, branch, export.repo);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executor_defaults_to_local() {
+        assert!(matches!(Executor::default(), Executor::Local));
+        assert!(matches!(Options::default().executor, Executor::Local));
+    }
+
+    #[test]
+    fn platform_props_select_linux_and_image() {
+        let p = platform_props("docker://example/img:tag");
+        assert_eq!(
+            p,
+            vec![
+                ("OSFamily".to_owned(), "Linux".to_owned()),
+                ("container-image".to_owned(), "docker://example/img:tag".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_settings_from_env_uses_default_image_and_props() {
+        // BUILDBUDDY_EXEC_IMAGE is not set in the hermetic test environment, so
+        // the default image is used and the standard Linux props are produced.
+        let s = RemoteSettings::from_env();
+        assert!(s
+            .platform
+            .iter()
+            .any(|(k, v)| k == "container-image" && v == DEFAULT_EXEC_IMAGE));
+        assert!(s
+            .platform
+            .iter()
+            .any(|(k, v)| k == "OSFamily" && v == "Linux"));
+    }
 }
