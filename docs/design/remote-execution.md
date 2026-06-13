@@ -11,11 +11,19 @@ the README and the "run reconciles in a sandbox" safety requirement in
 Read `../../CLAUDE.md` and `transformations.md` first. This is a design/roadmap
 artifact; the buildable first slice (R0–R3) is spec'd at the end.
 
-> **Status:** not started. The local execution path
-> (`src/engine/agent_exec.rs`, `LiveRunner` + the blake3 content-addressed
-> cache) is the baseline this replaces/augments. Scope decided for the first
-> pass: **Tier 1** (one `agent_transform` → one REAPI Action) against
-> **BuildBuddy Cloud**, with the **Action Cache as the agent-output cache**.
+> **Status:** the REAPI client foundation (R0–R1) is implemented and tested in
+> `src/remote/` — vendored v2 protos compiled via `build.rs` (`proto`), SHA256
+> digests + the `Directory` Merkle tree (`digest`), `Command`/`Action`
+> construction with a stable cache-key digest that excludes the credential
+> (`action`), and a blocking gRPC client with `x-buildbuddy-api-key` auth over
+> CAS / Action Cache / Execute (`client`). A live CAS+AC round-trip against
+> BuildBuddy Cloud is verified (gated on `BUILDBUDDY_API_KEY`). Still to do:
+> wire a `RemoteRunner` into the engine seam (R2), use `GetActionResult` as the
+> agent-output cache (R3), and fan reconcile transforms out to the pool (R4).
+> The local path (`src/engine/agent_exec.rs`, `LiveRunner` + blake3 cache)
+> remains the baseline this augments. Scope: **Tier 1** (one `agent_transform`
+> → one REAPI Action) against **BuildBuddy Cloud**, **Action Cache as the
+> agent-output cache**.
 
 ## Thesis: an `agent_transform` *is* a REAPI Action
 
@@ -177,18 +185,25 @@ Start at Minimal to land a remote round-trip, then lift the cache check to Full.
 Mirrors the M/T discipline: small, runnable, tested. Network-touching steps are
 gated behind an env-keyed integration test so `cargo test` stays hermetic.
 
-### R0 — REAPI client + CAS round-trip
-- New `remote` module: `tonic` + the `bazelbuild/remote-apis` protos. Connect to
-  BuildBuddy Cloud; `FindMissingBlobs` / `BatchUpdateBlobs` / read a blob back.
-- Acceptance: upload a blob, fetch it by digest from Cloud (integration test
-  gated on a `BUILDBUDDY_API_KEY` env var; skipped otherwise).
+### R0 — REAPI client + CAS round-trip ✅ done
+- `remote` module: `tonic` + vendored `bazelbuild/remote-apis` protos
+  (`src/remote/proto.rs`, `build.rs`). Blocking client (`src/remote/client.rs`)
+  for `FindMissingBlobs` / `BatchUpdateBlobs` / `BatchReadBlobs` /
+  `GetActionResult` / `Execute`, with `x-buildbuddy-api-key` auth.
+- Acceptance ✅: live upload→present→read-back→AC-miss round-trip, gated on
+  `BUILDBUDDY_API_KEY` (skipped otherwise); verified against BuildBuddy Cloud.
 
-### R1 — git tree → REAPI `input_root` + Action digest
-- Serialize a git subtree to a REAPI `Directory` Merkle tree (mode/exec/symlink
-  mapping); assemble `Command` (output_paths = the patch) + `Action`; compute the
-  Action digest.
-- Acceptance: deterministic Action digest for fixed inputs — a pure, offline
-  golden test (no network).
+### R1 — tree → REAPI `input_root` + Action digest ✅ done
+- Serialize a filesystem subtree to a REAPI `Directory` Merkle tree
+  (sorted; exec-bit/symlink mapping) in `src/remote/digest.rs`; assemble
+  `Command` (output_paths = the patch) + `Action` and compute the Action digest
+  in `src/remote/action.rs`.
+- Acceptance ✅: deterministic, order-independent root and Action digests; pure
+  offline tests, including the credential-not-in-digest invariant.
+- *Note:* R1 builds the input root from a checked-out filesystem subtree (what
+  the agent workdir looks like). A direct `git2::Tree` → `Directory` path can be
+  added later if we want to skip the checkout; the tree OID round-trip fidelity
+  is an open question below.
 
 ### R2 — Execute() + fetch the patch (Minimal `RemoteRunner`)
 - `RemoteRunner: AgentRunner` calls `Execute`, fetches `out.patch` from CAS,
@@ -211,20 +226,29 @@ gated behind an env-keyed integration test so `cargo test` stays hermetic.
 - Acceptance: a multi-target reconcile fans out remotely; remote-unavailable
   falls back to `LiveRunner`.
 
+## Resolved (by R0–R1)
+
+- **REAPI proto sourcing.** Vendored verbatim from the buck2 fork (which tracks
+  `bazelbuild/remote-apis`) and compiled with `tonic-prost-build` 0.14 in one
+  `build.rs`. Pinned by checking the protos into `proto/`.
+- **`x-buildbuddy-api-key` is the auth header**, injected by a tonic interceptor;
+  the key comes from `BUILDBUDDY_API_KEY` and is excluded from the Action digest
+  by construction (the `ActionSpec` has no credential field).
+
 ## Open questions
 
-- **BuildBuddy secret mechanism** for the model API key so it stays out of the
-  Action digest — platform header, BuildBuddy secrets, or a sidecar?
+- **BuildBuddy secret mechanism** for the *model* API key (the one the agent uses
+  inside the action), so it stays out of the Action digest — platform header,
+  BuildBuddy secrets, or a sidecar? (The *BuildBuddy* key is solved above; this
+  is the distinct in-action model credential.)
 - **Network egress policy** granularity on BuildBuddy actions (per-endpoint
   allowlist vs all-or-nothing).
-- **Directory serialization fidelity:** git ↔ REAPI mapping for exec bits,
-  symlinks, and empty dirs; does the round-trip preserve the tree OID on
-  re-import?
+- **Directory serialization fidelity:** the filesystem→`Directory` mapping is in;
+  open whether a direct `git2::Tree`→`Directory` path is worth it and whether the
+  round-trip preserves the tree OID on re-import (empty dirs, mode bits).
 - **Harness availability on executors:** vendored pinned binary in `input_root`
   (preferred, in-grain) vs a prebuilt executor image — which is more robust for
   Claude Code / Codex / `pi`?
-- **REAPI proto sourcing in Rust:** generate from `bazelbuild/remote-apis` via
-  `tonic-build`, or an existing crate? Pin the API version.
 - **Reproducibility vs freshness:** when (if ever) should a reconcile bypass the
   AC to let an agent re-run against newer upstream context, given record-and-
   replay otherwise pins the first patch forever?
