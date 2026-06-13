@@ -12,3 +12,7 @@ secrets.env
 
 # Project instructions, kept local only (purged from history).
 CLAUDE.md
+
+# Playwright CLI scratch / artifacts
+.playwright-cli/
+output/playwright/
