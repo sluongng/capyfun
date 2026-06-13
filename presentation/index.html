@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CapyFun — pitch</title>
+<style>
+  :root{
+    --bg:#0c1117; --bg2:#0f1722;
+    --fg:#e7edf3; --muted:#94a3b2; --faint:#64748b;
+    --accent:#ffb454;   /* capybara amber */
+    --accent2:#5ccfe6;  /* tinytree teal  */
+    --green:#bae67e; --pink:#f28779;
+    --card:rgba(255,255,255,.045); --line:rgba(255,255,255,.12);
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(92,207,230,.10), transparent 60%),
+      radial-gradient(1000px 600px at 0% 110%, rgba(255,180,84,.10), transparent 55%),
+      linear-gradient(180deg,var(--bg),var(--bg2));
+    color:var(--fg); font-family:var(--sans);
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  .deck{position:relative; height:100vh; width:100vw}
+  .slide{
+    position:absolute; inset:0; display:none;
+    flex-direction:column; justify-content:center;
+    padding:6vh 8vw; gap:2.2vh;
+    animation:fade .35s ease both;
+  }
+  .slide.active{display:flex}
+  @keyframes fade{from{opacity:0; transform:translateY(14px)}to{opacity:1; transform:none}}
+
+  .kicker{color:var(--accent); font-weight:700; letter-spacing:.16em; text-transform:uppercase; font-size:clamp(11px,1.2vw,15px)}
+  h1{font-size:clamp(34px,6vw,76px); line-height:1.02; font-weight:800; letter-spacing:-.02em}
+  h2{font-size:clamp(26px,4vw,50px); line-height:1.05; font-weight:800; letter-spacing:-.015em}
+  h2 .em{color:var(--accent)}
+  .sub{color:var(--muted); font-size:clamp(15px,1.8vw,24px); font-weight:500}
+  ul{list-style:none; display:flex; flex-direction:column; gap:1.4vh}
+  li{position:relative; padding-left:1.5em; font-size:clamp(16px,2vw,27px); line-height:1.3}
+  li::before{content:"▹"; position:absolute; left:0; color:var(--accent2)}
+  li .hl{color:var(--accent)}
+  li .hl2{color:var(--accent2)}
+  .small{font-size:clamp(13px,1.5vw,20px)}
+  .muted{color:var(--muted)}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:3vw; align-items:start}
+  .panel{background:var(--card); border:1px solid var(--line); border-radius:16px; padding:2.4vh 1.8vw}
+  .panel h3{font-size:clamp(14px,1.5vw,20px); color:var(--accent); margin-bottom:1.2vh; letter-spacing:.04em; text-transform:uppercase}
+
+  pre{background:#0a0e14; border:1px solid var(--line); border-radius:14px;
+      padding:2.2vh 1.6vw; overflow:auto; font-family:var(--mono);
+      font-size:clamp(12px,1.35vw,19px); line-height:1.55}
+  code{font-family:var(--mono)}
+  .fn{color:var(--accent2)} .str{color:var(--green)} .com{color:var(--faint); font-style:italic}
+  .kw{color:var(--pink)} .pl{color:var(--fg)}
+
+  .tag{display:inline-block; background:rgba(255,180,84,.14); color:var(--accent);
+       border:1px solid rgba(255,180,84,.35); border-radius:999px;
+       padding:.2em .8em; font-size:clamp(12px,1.3vw,18px); font-weight:600}
+  .pill-row{display:flex; gap:.7em; flex-wrap:wrap}
+
+  .footer{position:fixed; bottom:18px; left:0; right:0; display:flex; justify-content:space-between;
+          align-items:center; padding:0 22px; font-size:13px; color:var(--faint); pointer-events:none}
+  .dots{display:flex; gap:8px}
+  .dot{width:8px; height:8px; border-radius:50%; background:rgba(255,255,255,.18); transition:.2s}
+  .dot.on{background:var(--accent); transform:scale(1.25)}
+  .brand{font-weight:800; letter-spacing:-.01em; color:var(--muted)}
+  .brand b{color:var(--accent)}
+
+  .notes{position:fixed; left:22px; right:22px; bottom:46px; max-width:none;
+         background:rgba(10,14,20,.96); border:1px solid var(--line); border-radius:12px;
+         padding:14px 18px; font-size:15px; line-height:1.45; color:#cdd6e0; display:none}
+  body.notes-on .notes{display:block}
+
+  .title-wrap{gap:1.2vh}
+  .title-wrap .logo{font-size:clamp(48px,9vw,128px); font-weight:900; letter-spacing:-.04em}
+  .title-wrap .logo .fun{color:var(--accent)}
+  .lede{font-size:clamp(17px,2.2vw,30px); max-width:24ch}
+
+  /* diagram */
+  .diagram{width:100%; max-height:54vh}
+  .legend{font-size:clamp(13px,1.5vw,20px); color:var(--muted); line-height:1.4}
+  .legend b{color:var(--fg)} .legend .o{color:var(--accent)} .legend .i{color:var(--accent2)}
+
+  .hint{position:fixed; top:16px; right:18px; font-size:12px; color:var(--faint); opacity:.6}
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <!-- 1 — TITLE / INTRO -->
+  <section class="slide title-wrap" data-notes="I'm Son. At BuildBuddy I help big companies run Bazel in huge monorepos. On the side I'm building tinytree — a forge made for monorepos. This is its import/export engine, CapyFun.">
+    <div class="kicker">tinytree.dev</div>
+    <div class="logo">Capy<span class="fun">Fun</span></div>
+    <div class="lede sub">The code <b style="color:var(--fg)">import / export</b> engine for monorepos.</div>
+    <ul style="margin-top:3vh">
+      <li><span class="hl">Son Luong</span> — BuildBuddy: Bazel in big-tech monorepos</li>
+      <li>Side project: <span class="hl2">tinytree.dev</span>, a forge built for monorepos</li>
+      <li>Today: CapyFun — tinytree's import / export pipeline</li>
+    </ul>
+  </section>
+
+  <!-- 2 — THESIS -->
+  <section class="slide" data-notes="Coding agents are trained on simple filesystem tools, so a monorepo is the perfect context interface. But monorepo tooling is terrible unless you're Google or Meta. With an infinitely-scaling, lazily-loaded tree, you can version-control things you used to hide — your models, your external deps — and agents can reach all of it.">
+    <div class="kicker">Thesis</div>
+    <h2>Agents thrive in <span class="em">monorepos</span></h2>
+    <ul>
+      <li>Trained on filesystem tools → a monorepo is the <span class="hl">rich context interface</span> they already know</li>
+      <li>Monorepo tooling is terrible unless you're Google / Meta — <span class="hl2">tinytree changes that</span></li>
+      <li>Lazily-loaded, sparse-by-default → <span class="hl">version-control your models &amp; 3rd-party deps</span></li>
+      <li class="muted small">…the things you used to banish to LFS or <code>.gitignore</code></li>
+    </ul>
+  </section>
+
+  <!-- 3 — THE LOOP (climax) -->
+  <section class="slide" data-notes="The hackathon asks where the orchestration loop is. It's not inside one repo — it's between them. You have a monorepo, I have one, the OSS world is a mesh, all emitting and reacting to events. Each node runs a level-triggered reconciler — events are hints, the commit map is truth. My agents react to what your agents changed, transform it, and emit their own events. That's the outer loop: agents collaborating through code.">
+    <div class="kicker">Multi-agent orchestration</div>
+    <h2>Where's the loop? It's <span class="em">between repos</span></h2>
+    <svg class="diagram" viewBox="0 0 1000 470" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <marker id="ar" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="#94a3b2"/>
+        </marker>
+        <marker id="aro" markerWidth="12" markerHeight="12" refX="8" refY="3.5" orient="auto">
+          <path d="M0,0 L8,3.5 L0,7 Z" fill="#ffb454"/>
+        </marker>
+      </defs>
+
+      <!-- hub -->
+      <rect x="170" y="20" width="660" height="86" rx="16" fill="rgba(92,207,230,.08)" stroke="#5ccfe6" stroke-width="1.5"/>
+      <text x="500" y="55" text-anchor="middle" fill="#e7edf3" font-size="25" font-weight="800" font-family="ui-sans-serif,system-ui">GitHub / Tinytree — the event mesh</text>
+      <text x="500" y="84" text-anchor="middle" fill="#94a3b2" font-size="18" font-family="ui-sans-serif,system-ui">push · release · PR-merged  →  fan out to subscribers</text>
+
+      <!-- connectors -->
+      <g stroke="#94a3b2" stroke-width="1.6">
+        <line x1="245" y1="106" x2="245" y2="250" marker-end="url(#ar)" marker-start="url(#ar)"/>
+        <line x1="500" y1="106" x2="500" y2="250" marker-end="url(#ar)" marker-start="url(#ar)"/>
+        <line x1="780" y1="106" x2="780" y2="250" marker-end="url(#ar)" marker-start="url(#ar)"/>
+      </g>
+      <g fill="#64748b" font-size="14" font-family="ui-sans-serif,system-ui" text-anchor="middle">
+        <text x="275" y="183">emit ↕ react</text>
+        <text x="530" y="183">emit ↕ react</text>
+        <text x="812" y="183">react</text>
+      </g>
+
+      <!-- nodes -->
+      <g font-family="ui-sans-serif,system-ui">
+        <rect x="150" y="250" width="190" height="120" rx="14" fill="rgba(255,180,84,.07)" stroke="#ffb454" stroke-width="1.5"/>
+        <text x="245" y="298" text-anchor="middle" fill="#e7edf3" font-size="22" font-weight="700">YOUR monorepo</text>
+        <text x="245" y="330" text-anchor="middle" fill="#94a3b2" font-size="18">CapyFun + 🤖</text>
+
+        <rect x="405" y="250" width="190" height="120" rx="14" fill="rgba(255,180,84,.07)" stroke="#ffb454" stroke-width="1.5"/>
+        <text x="500" y="298" text-anchor="middle" fill="#e7edf3" font-size="22" font-weight="700">MY monorepo</text>
+        <text x="500" y="330" text-anchor="middle" fill="#94a3b2" font-size="18">CapyFun + 🤖</text>
+
+        <rect x="685" y="250" width="190" height="120" rx="14" fill="rgba(255,255,255,.04)" stroke="#94a3b2" stroke-width="1.3"/>
+        <text x="780" y="298" text-anchor="middle" fill="#e7edf3" font-size="22" font-weight="700">OSS repos</text>
+        <text x="780" y="330" text-anchor="middle" fill="#94a3b2" font-size="18">(upstream)</text>
+      </g>
+
+      <!-- outer loop arc -->
+      <path d="M340,355 C 372,430 470,430 500,372" fill="none" stroke="#ffb454" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#aro)"/>
+      <text x="420" y="455" text-anchor="middle" fill="#ffb454" font-size="15" font-weight="700" font-family="ui-sans-serif,system-ui">outer loop</text>
+    </svg>
+    <div class="legend">
+      <span class="i">Inner loop:</span> agent ↔ code, one repo &nbsp;·&nbsp;
+      <span class="o">Outer loop:</span> your export → event → my import + transform → my export → …
+    </div>
+  </section>
+
+  <!-- 4 — GENERATIVE / COMPOSABLE -->
+  <section class="slide" data-notes="The interesting transforms are generative — run an agent over the incoming change. Agents are composed in Starlark, the language Bazel and Buck2 shops already use. Pick a harness, a model, template the prompt — all as code, swappable. The output is captured as a content-addressed patch, so it stays reproducible. Then go to the demo.">
+    <div class="kicker">Technical · the transform engine</div>
+    <h2>Agents as <span class="em">composable config</span></h2>
+    <div class="sub small">Skip imperative — the interesting part is generative: run an agent with source + the change as context. Composed in <b style="color:var(--fg)">Starlark</b>, familiar to Bazel / Buck2 shops.</div>
+<pre><code><span class="fn">harness</span>(name=<span class="str">"claude_code"</span>, kind=<span class="str">"claude_code"</span>, plugins=[<span class="str">"//tools/plugins:bazel"</span>])
+<span class="fn">model</span>(name=<span class="str">"opus"</span>, provider=<span class="str">"anthropic"</span>, id=<span class="str">"claude-opus-4-8"</span>)
+<span class="fn">agent</span>(name=<span class="str">"porter"</span>, harness=<span class="str">"//tools/harness:claude_code"</span>, model=<span class="str">"//tools/models:opus"</span>)
+
+<span class="fn">agent_transform</span>(agent=<span class="str">"//tools/agent:porter"</span>,
+                prompt=<span class="fn">template</span>(<span class="str">"//tools/agent/prompts:port"</span>))</code></pre>
+    <div class="pill-row">
+      <span class="tag">harness × model × prompt</span>
+      <span class="tag">output → content-addressed patch</span>
+      <span class="tag">reproducible</span>
+    </div>
+  </section>
+
+  <!-- 5 — USE CASES -->
+  <section class="slide" data-notes="Use cases: scan every import for vulns; give it a goal like optimizing kernel changes for your specific hardware — which works because those profiles live in the tree; or migrate code against an upstream API. Same engine on export. And nothing's trusted blindly — Bazel CI verifies.">
+    <div class="kicker">Use cases</div>
+    <h2>Transform code <span class="em">in &amp; out</span></h2>
+    <div class="grid2">
+      <div class="panel">
+        <h3>Import · outer world → monorepo</h3>
+        <ul>
+          <li>🔍 <span class="hl">Scan</span> — security / license over every change</li>
+          <li>⚙️ <span class="hl">Optimize to a goal</span> — “tune these kernel changes for my datacenter's hardware profiles”</li>
+          <li>🔁 <span class="hl">Migrate</span> — rewrite our app vs upstream's new API</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Export · monorepo → outer world</h3>
+        <ul>
+          <li>📤 “update the OSS demo app <span class="hl2">+ docs</span> to match my new SDK” — before the PR goes out</li>
+        </ul>
+        <p class="small muted" style="margin-top:2vh">Same vocabulary, both directions.</p>
+      </div>
+    </div>
+    <div class="sub small"><span class="hl">Agents propose, Bazel CI disposes</span> — transformed changes are verified imperatively.</div>
+  </section>
+
+  <!-- 6 — WHAT'S NEXT -->
+  <section class="slide" data-notes="Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits.">
+    <div class="kicker">Roadmap</div>
+    <h2>What's <span class="em">next</span></h2>
+    <ul>
+      <li><span class="hl">Close the loop</span> — export → PR, emit events back into the mesh</li>
+      <li><span class="hl">Scale on Bazel RBE + remote cache</span> — output already content-addressed → parallelism &amp; dedup come free</li>
+      <li><span class="hl">Broaden the triggers</span> — bug reports, metric anomalies, production alerts</li>
+      <li><span class="hl">Richer source rules</span> — import by commit / tag · export by PR / straight to main</li>
+      <li class="muted small">(same content-addressing → replay history to benchmark agents &amp; bisect regressions)</li>
+    </ul>
+  </section>
+
+  <!-- 7 — DEMO -->
+  <section class="slide" data-notes="Run materialize-widget. Point at: imported 2 commits / tip patch — real import not a squash. CapyFun-Origin on each commit — the commit map, provenance to upstream. go.mod toolchain line — a tip patch layered on the faithful mirror. Close: history preserved, every file traceable, reproducible — and the same engine runs an LLM transform when you want one.">
+    <div class="kicker">Demo · 60s · hermetic, no network</div>
+    <h2>Lockfiles &amp; history, <span class="em">materialized</span></h2>
+<pre><code><span class="com"># one command — builds a local upstream &amp; runs a real import</span>
+$ examples/transforms/materialize-widget.sh</code></pre>
+    <ul class="small">
+      <li><span class="hl">imported 2 commit(s) · tip: 1 patch</span> — a real import, not a squash</li>
+      <li><span class="hl2">CapyFun-Origin: &lt;sha&gt;</span> on every commit — the commit map, provenance to upstream</li>
+      <li><span class="hl">go.mod → toolchain go1.21.6</span> — a tip patch layered on the faithful mirror</li>
+    </ul>
+    <div class="sub small">History preserved · every file traceable · reproducible — and the same engine runs an LLM transform.</div>
+  </section>
+
+</div>
+
+<div class="notes" id="notes"></div>
+<div class="hint">→ / space · &nbsp;f fullscreen · &nbsp;s notes</div>
+<div class="footer">
+  <div class="brand">Capy<b>Fun</b></div>
+  <div class="dots" id="dots"></div>
+</div>
+
+<script>
+  const slides=[...document.querySelectorAll('.slide')];
+  const dotsEl=document.getElementById('dots');
+  const notesEl=document.getElementById('notes');
+  let i=0;
+  slides.forEach((_,n)=>{const d=document.createElement('div');d.className='dot';dotsEl.appendChild(d);});
+  const dots=[...document.querySelectorAll('.dot')];
+  function show(n){
+    i=Math.max(0,Math.min(slides.length-1,n));
+    slides.forEach((s,k)=>s.classList.toggle('active',k===i));
+    dots.forEach((d,k)=>d.classList.toggle('on',k===i));
+    notesEl.textContent=slides[i].dataset.notes||'';
+    location.hash=i+1;
+  }
+  function next(){show(i+1)} function prev(){show(i-1)}
+  document.addEventListener('keydown',e=>{
+    if(['ArrowRight','PageDown',' '].includes(e.key)){e.preventDefault();next();}
+    else if(['ArrowLeft','PageUp'].includes(e.key)){e.preventDefault();prev();}
+    else if(e.key==='Home'){show(0)} else if(e.key==='End'){show(slides.length-1)}
+    else if(e.key==='f'){if(!document.fullscreenElement)document.documentElement.requestFullscreen();else document.exitFullscreen();}
+    else if(e.key==='s'){document.body.classList.toggle('notes-on');}
+    else if(/^[1-9]$/.test(e.key)){show(+e.key-1);}
+  });
+  document.addEventListener('click',e=>{ if(e.clientX < innerWidth*0.25) prev(); else next(); });
+  const start=parseInt(location.hash.slice(1));
+  show(Number.isFinite(start)&&start>0?start-1:0);
+</script>
+</body>
+</html>
