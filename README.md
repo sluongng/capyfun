@@ -146,6 +146,45 @@ Same vocabulary, both directions.
 
 ---
 
+## Reactions: react to forge events, open a PR
+
+Beyond *moving* code across tree boundaries, CapyFun **reacts** to GitHub events
+by running a coding agent and opening a PR — the generative counterpart to
+import/export. The first reaction is **`on_issue`**: an issue labeled for an
+agent gets a prototype PR.
+
+```python
+# //automation/SRC  — issue → agent → PR
+on_issue(
+    name   = "prototype-assigned",
+    repo   = "acme/backend",            # owner/name the GitHub App is installed on
+    action = "labeled",
+    label  = "assign-agent",
+    agent  = "//tools/agent:reviewer",  # reuses the same agent/harness/model rules
+    prompt = template("//tools/agent/prompts:prototype-issue"),
+)
+```
+
+For a matched issue: clone → branch `capyfun/issue-<n>` → run the agent (with
+`{{issue_title}}`/`{{issue_body}}`/… context vars) → commit with `CapyFun-Agent` /
+`CapyFun-Issue` trailers → push → open a PR (`Closes #<n>`). **No edits → no PR.**
+
+- **GitHub App identity** — mints an RS256 App JWT, exchanges it for an
+  installation token, and uses it for clone/push and the PR call. App credentials
+  come from the environment, never the repo. A `LocalForge` runs the whole loop
+  hermetically against local bare repos.
+- **Webhook hardening** — the endpoint **fails closed** without a secret, verifies
+  `X-Hub-Signature-256` (HMAC-SHA256, constant-time) before acting, routes by
+  `X-GitHub-Event`, and dedupes redeliveries by `X-GitHub-Delivery`.
+
+This is a **deliberate scope change**: CapyFun now acts on forge events and opens
+PRs, but it still **never merges** — a human (or policy) reviews. Try it
+hermetically with `scripts/smoke-react.sh`; see
+[`docs/design/reactions.md`](docs/design/reactions.md) and
+[`examples/reactions/`](examples/reactions/).
+
+---
+
 ## 30-second pitch
 
 > **CapyFun makes LLM code transforms reproducible, reviewable, and replayable
@@ -234,7 +273,8 @@ capyfun <command>
 | `gen-go` | Scaffold import `SRC` files from a `go.mod` / `go.sum`. |
 | `gen-cargo` | Scaffold `git_repository` snapshot `SRC` files from `Cargo.toml` / `Cargo.lock`. |
 | `gen-npm` | Scaffold a `git_repository` snapshot `SRC` from `package.json` / `package-lock.json`. |
-| `serve` | Automation server: poll GH Archive and host the webhook endpoint (`--once` for a single cycle). |
+| `serve` | Automation server: poll GH Archive and host the (HMAC-verified) webhook endpoint (`--once` for a single cycle). |
+| `react --issue <payload>` | Run an `on_issue` reaction from a GitHub `issues` webhook payload: clone → agent → PR (`--dry-run` to preview). |
 | `agent-run` | Run a coding-agent harness over a prompt (proof of the `agent_transform` path). |
 
 Labels are Bazel-style, e.g. `//third_party/backend:backend`.
@@ -252,8 +292,9 @@ mirrors Bazel's `BUILD` / `.bzl` split:
   `//`-anchored path. They never instantiate rules.
 
 **Rules** (instantiated only in `SRC` files): `monorepo`, `github_import`,
-`github_export`, `git_repository` (pinned snapshot), and the agent-tool rules
-`harness`, `model`, `agent`, `prompt_template`.
+`github_export`, `git_repository` (pinned snapshot), the agent-tool rules
+`harness`, `model`, `agent`, `prompt_template`, and the reaction rule `on_issue`
+(run an agent on a labeled issue and open a PR).
 
 **Value constructors** (pure, usable anywhere): `replace`, `move`, `copy`,
 `apply_patch`, `rewrite_message`, `agent_transform`, and the `template` helper.
@@ -311,7 +352,9 @@ out to harness CLIs (Claude Code, Codex, …).
 
 Design docs live in [`docs/`](docs/):
 [transformations](docs/design/transformations.md),
-[automation](docs/design/automation.md), and the
+[automation](docs/design/automation.md),
+[reactions](docs/design/reactions.md),
+[remote execution](docs/design/remote-execution.md), and the
 [import roadmap](docs/plans/import-roadmap.md).
 
 ---
@@ -382,7 +425,8 @@ load-bearing record — the only thing that changes is *where* the work runs and
 ## What CapyFun is *not*
 
 - Not a general transformation DSL — transforms are a closed, typed vocabulary.
-- Not a review product, CI system, or forge.
+- Not a review product or CI system. CapyFun now *reacts* to forge events
+  (issue → agent → PR) and opens PRs, but it never merges — a human reviews.
 - Not a symmetric two-way merge engine — import and export are separate by
   design.
 - Not a custom storage protocol — it works on ordinary Git repositories.
@@ -399,11 +443,13 @@ A hackathon project, biased toward small, runnable, tested milestones.
   hermetic fixture), an **eval harness** with measurable results
   ([`docs/evals.md`](docs/evals.md)), a level-triggered reconciler, vendoring,
   lockfile scaffolding (`gen-go` / `gen-cargo` / `gen-npm`), export (branch push
-  + commit map + PR), a GH-Archive automation poller, and a REAPI/BuildBuddy
-  remote executor for agent transforms. 220+ tests.
-- **Next:** broader triggers (bug reports, metric anomalies, production alerts),
-  richer source rules (import by commit/tag, export straight to main), and
-  fleet-scale orchestration with quota/spend governance.
+  + commit map + PR), a GH-Archive automation poller, a REAPI/BuildBuddy remote
+  executor for agent transforms, and **`on_issue` reactions** (issue → agent → PR
+  via a GitHub App, with HMAC-verified webhooks). 220+ tests.
+- **Next:** more reaction triggers (`on_push` / `on_tag`, then bug reports,
+  metric anomalies, production alerts), an agent sandbox, richer source rules
+  (import by commit/tag, export straight to main), and fleet-scale orchestration
+  with quota/spend governance.
 
 For judges: [`docs/hackathon-judging.md`](docs/hackathon-judging.md) maps the repo
 to the rubric.

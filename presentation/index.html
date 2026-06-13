@@ -239,13 +239,13 @@
   </section>
 
   <!-- 6 — WHAT'S NEXT -->
-  <section class="slide" data-notes="Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits.">
+  <section class="slide" data-notes="Reactions already ship today — beyond moving code, CapyFun reacts to a GitHub event by running an agent and opening a PR. The first is on_issue: label an issue, get a prototype PR, authenticated as a GitHub App, webhooks HMAC-verified — it opens PRs but never merges. Next: more triggers (push, tag, production signals), and scale onto Bazel's remote execution where dedup is free because output's content-addressed.">
     <div class="kicker">Roadmap</div>
     <h2>What's <span class="em">next</span></h2>
     <ul>
-      <li><span class="hl">Close the loop</span> — export → PR, emit events back into the mesh</li>
+      <li><span class="hl">Reactions ship today</span> — <span class="hl2">issue → agent → PR</span> (<code>on_issue</code>), as a GitHub App · HMAC-verified · opens PRs, never merges</li>
+      <li><span class="hl">Broaden the triggers</span> — <code>on_push</code> / <code>on_tag</code>, then bug reports, metric anomalies, production alerts</li>
       <li><span class="hl">Scale on Bazel RBE + remote cache</span> — output already content-addressed → parallelism &amp; dedup come free</li>
-      <li><span class="hl">Broaden the triggers</span> — bug reports, metric anomalies, production alerts</li>
       <li><span class="hl">Richer source rules</span> — import by commit / tag · export by PR / straight to main</li>
     </ul>
   </section>

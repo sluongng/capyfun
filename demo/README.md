@@ -30,6 +30,27 @@ across 3 fixtures, see [`scripts/eval-agents.sh`](../scripts/eval-agents.sh) and
 
 ---
 
+## `scripts/smoke-react.sh` — issue → agent → PR, hermetic
+
+```sh
+scripts/smoke-react.sh        # no network, no real agent; rerunnable
+```
+
+Exercises the **`on_issue` reaction** end-to-end: it builds a local bare origin
+for `acme/backend`, stubs the agent harness with a fake `claude` that edits the
+checkout, and runs the real `capyfun react` CLI over a saved `issues` webhook
+payload (`testdata/issue-labeled.json`) against the
+[`examples/reactions/`](../examples/reactions/) config.
+
+It first does a `--dry-run` (resolve + match only), then the live reaction
+(clone → branch `capyfun/issue-7` → agent edit → commit → push → record PR via the
+hermetic `LocalForge`), and asserts the prototype branch landed with the agent's
+change plus the `CapyFun-Agent` / `CapyFun-Issue` provenance trailers. Against a
+real GitHub remote, the GitHub-App `Forge` clones/pushes and opens the PR. See
+[`docs/design/reactions.md`](../docs/design/reactions.md).
+
+---
+
 ## `run.sh` — multi-language dependencies as monorepo source
 
 This demo shows CapyFun as a history-preserving alternative to per-language

@@ -44,8 +44,8 @@ If you run long, cut from slides 1 and 6 — never from slide 3.
 **Emphasis:** "agents propose, Bazel CI disposes" — this is your trust answer.
 
 ## Slide 6 — What's next · 0:10
-**Say:** "Import and export both run end-to-end today, with agent transforms verified and cached. Next: scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits."
-**Close line:** "The round-trip works today; what's left is running it at fleet scale and reacting to more than commits."
+**Say:** "Import and export both run end-to-end today, with agent transforms verified and cached — and beyond moving code, CapyFun already *reacts* to forge events: label an issue and an agent opens a prototype PR, authenticated as a GitHub App with HMAC-verified webhooks. It opens PRs, never merges. Next: more triggers — push, tag, production signals — and scaling onto Bazel's remote execution, where dedup is free because the output's content-addressed."
+**Close line:** "The round-trip works today, and reactions already turn an issue into a PR; what's left is more triggers and running it at fleet scale."
 
 ---
 
@@ -85,7 +85,8 @@ demo/full-loop.sh
 - **"Why is import per-commit instead of a squash?"** — "Faithfulness: each mirrored commit maps 1:1 to its origin via the CapyFun-Origin trailer, so history and provenance survive, and re-import is incremental."
 - **"Determinism with a non-deterministic LLM?"** — "Generation happens once; we materialize the agent's edits to a content-addressed patch keyed on (input subtree, prompt, agent identity) and replay *that*. Re-imports are reproducible and free; `--refresh` regenerates. The eval harness proves it with a deterministic mock executor."
 - **"How do you show cost/quality?"** — "`scripts/eval-agents.sh` reports a table: success, verifier, runtime, replay time, and cache miss→hit. The model only runs on a cache miss; replays are $0.00."
-- **"What's actually built vs. designed?"** — "Built: import + export round-trip, imperative + generative transforms executing with a content-addressed cache, the verify→retry loop, three executors (local/remote-REAPI/fixture), an eval harness, the reconciler, vendoring, lockfile scaffolding, the GH-Archive poller. 220+ tests. Designed/next: broader triggers, richer source rules, fleet-scale quota/spend governance."
+- **"What's actually built vs. designed?"** — "Built: import + export round-trip, imperative + generative transforms executing with a content-addressed cache, the verify→retry loop, three executors (local/remote-REAPI/fixture), an eval harness, the reconciler, vendoring, lockfile scaffolding, the GH-Archive poller, and `on_issue` reactions (issue → agent → PR via a GitHub App, HMAC-verified webhooks). 220+ tests. Designed/next: more triggers (`on_push`/`on_tag`), an agent sandbox, richer source rules, fleet-scale quota/spend governance."
+- **"Reactions — isn't that a forge / aren't you replacing review?"** — "No. CapyFun reacts to a forge event by running an agent and opening a PR — it acts on events and opens PRs, but it never merges. A human or policy reviews. It augments the forge's review, doesn't replace it."
 
 ---
 
