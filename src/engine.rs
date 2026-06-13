@@ -115,6 +115,34 @@ pub fn parse_origin_trailer(message: &str) -> Option<String> {
 /// these names within the destination would be shadowed.)
 const RESERVED_DEST_ENTRIES: [&str; 2] = ["SRC", "patches"];
 
+/// CapyFun's package-marker filename.
+const SRC_FILE: &str = "SRC";
+/// Imported `SRC` files are renamed to this so they are not mistaken for CapyFun
+/// package markers by discovery.
+const RENAMED_SRC_FILE: &str = "ORIG_SRC";
+
+/// Rewrite an imported tree so any file named `SRC` (at any depth) is renamed to
+/// `ORIG_SRC`. This keeps an upstream repo's own `SRC` files from being picked up
+/// as CapyFun packages once they land in the monorepo. Deterministic: a tree
+/// with no `SRC` files rewrites to an identical OID.
+fn rename_src_markers(repo: &Repository, tree_oid: Oid) -> Result<Oid> {
+    let tree = repo.find_tree(tree_oid)?;
+    let mut builder = repo.treebuilder(None)?;
+    for entry in tree.iter() {
+        let name = entry.name().context("non-UTF-8 tree entry name")?;
+        let mode = entry.filemode();
+        if entry.kind() == Some(git2::ObjectType::Tree) {
+            let rewritten = rename_src_markers(repo, entry.id())?;
+            builder.insert(name, rewritten, mode)?;
+        } else if name == SRC_FILE {
+            builder.insert(RENAMED_SRC_FILE, entry.id(), mode)?;
+        } else {
+            builder.insert(name, entry.id(), mode)?;
+        }
+    }
+    Ok(builder.write()?)
+}
+
 /// Build the destination subtree for a mirror commit: the origin tree, with any
 /// reserved CapyFun-metadata entries (see [`RESERVED_DEST_ENTRIES`]) carried over
 /// from the existing destination subtree in `base_tree`.
@@ -160,7 +188,7 @@ pub fn replay_commit(
     let origin_commit = repo
         .find_commit(origin)
         .with_context(|| format!("origin commit {origin} not found"))?;
-    let origin_tree = origin_commit.tree()?.id();
+    let origin_tree = rename_src_markers(repo, origin_commit.tree()?.id())?;
 
     let base_tree = match parent {
         Some(p) => repo.find_commit(p)?.tree()?.id(),
@@ -354,7 +382,7 @@ pub fn vendor_snapshot(
         Some(t) => repo.find_commit(t)?.tree()?.id(),
         None => empty_tree(repo)?,
     };
-    let snapshot_tree = repo.find_commit(commit)?.tree()?.id();
+    let snapshot_tree = rename_src_markers(repo, repo.find_commit(commit)?.tree()?.id())?;
     let dest_subtree = dest_subtree_preserving_metadata(repo, base_tree, dest, snapshot_tree)?;
     let new_tree = repo.find_tree(splice_tree(repo, base_tree, dest, dest_subtree)?)?;
 

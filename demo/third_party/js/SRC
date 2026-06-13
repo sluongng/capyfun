@@ -1,0 +1,17 @@
+# Coarse-grained style: one SRC for the whole language directory, with a target
+# per dependency. Each target uses `into` to land in its own subdirectory
+# (so destinations do not overlap).
+
+git_repository(
+    name = "escape-string-regexp",
+    repo = "sindresorhus/escape-string-regexp",
+    commit = "cbc42403142c96923b482604e1f3d627b1956aff",
+    into = "escape-string-regexp",
+)
+
+git_repository(
+    name = "ansi-styles",
+    repo = "chalk/ansi-styles",
+    commit = "faf414e7b479435b5a86b15ecb13fe89ecf5bd0e",
+    into = "ansi-styles",
+)

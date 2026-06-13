@@ -1,0 +1,5 @@
+git_repository(
+    name = "thiserror",
+    repo = "dtolnay/thiserror",
+    commit = "7214e0e8331d76afbea7173d8a14997512ac8713",
+)

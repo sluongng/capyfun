@@ -1,0 +1,10 @@
+{
+  "name": "demo",
+  "version": "0.1.0",
+  "private": true,
+  "comment": "These packages are vendored into third_party/js/ via git_repository targets (see third_party/js/SRC).",
+  "dependencies": {
+    "ansi-styles": "^6.2.1",
+    "escape-string-regexp": "^5.0.0"
+  }
+}

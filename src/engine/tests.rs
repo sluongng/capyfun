@@ -607,3 +607,68 @@ fn import_with_patches_is_idempotent_and_rebases() {
         vec![c2.to_string(), c1.to_string()]
     );
 }
+
+// --- SRC marker renaming (avoid colliding with CapyFun package markers) ---
+
+#[test]
+fn imported_src_files_are_renamed_to_orig_src() {
+    let (_d, repo) = temp_repo();
+    // Pre-existing CapyFun config at the destination (SRC + patches).
+    let base = commit(
+        &repo,
+        write_tree(
+            &repo,
+            &[("dst/SRC", "capyfun config"), ("dst/patches/p", "x")],
+        ),
+        "config\n",
+        &[],
+    );
+    // Upstream repo that itself contains SRC files at several depths.
+    let origin = commit(
+        &repo,
+        write_tree(
+            &repo,
+            &[("SRC", "upstream"), ("sub/SRC", "y"), ("README", "r")],
+        ),
+        "up\n",
+        &[],
+    );
+
+    let mirror = replay_commit(&repo, "dst", origin, Some(base)).unwrap();
+    let files = read_tree(
+        &repo,
+        repo.find_commit(mirror).unwrap().tree().unwrap().id(),
+    );
+
+    // Upstream SRC files were renamed, at every depth.
+    assert_eq!(files.get("dst/ORIG_SRC").unwrap(), "upstream");
+    assert_eq!(files.get("dst/sub/ORIG_SRC").unwrap(), "y");
+    assert!(!files.contains_key("dst/sub/SRC"));
+    assert_eq!(files.get("dst/README").unwrap(), "r");
+    // CapyFun's own metadata at the destination survived.
+    assert_eq!(files.get("dst/SRC").unwrap(), "capyfun config");
+    assert_eq!(files.get("dst/patches/p").unwrap(), "x");
+}
+
+#[test]
+fn vendor_also_renames_src_markers() {
+    let (_d, repo) = temp_repo();
+    let snap = commit(
+        &repo,
+        write_tree(&repo, &[("SRC", "up"), ("lib.rs", "code")]),
+        "v\n",
+        &[],
+    );
+    let out = vendor_snapshot(&repo, "third_party/rust/dep", "o/dep", snap, None).unwrap();
+    let files = read_tree(
+        &repo,
+        repo.find_commit(out.head.unwrap())
+            .unwrap()
+            .tree()
+            .unwrap()
+            .id(),
+    );
+    assert_eq!(files.get("third_party/rust/dep/ORIG_SRC").unwrap(), "up");
+    assert_eq!(files.get("third_party/rust/dep/lib.rs").unwrap(), "code");
+    assert!(!files.contains_key("third_party/rust/dep/SRC"));
+}

@@ -1,0 +1,10 @@
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+# These crates are vendored into third_party/rust/ via `git_repository` rules
+# (see third_party/rust/*/SRC).
+[dependencies]
+anyhow = "1"
+thiserror = "1"
