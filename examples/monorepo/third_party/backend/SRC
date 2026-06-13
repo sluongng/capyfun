@@ -1,0 +1,18 @@
+# SRC file for the vendored `backend` import.
+#
+# This package is `//third_party/backend`. With distributed SRC files, the
+# import lands in this package's own directory: `into` defaults to the package,
+# so `backend`'s upstream source is mirrored here under `third_party/backend/`.
+#
+# Patch paths are relative to this SRC file.
+
+load("//lib/github.star", "vendored")
+
+vendored(
+    name = "backend",
+    repo = "acme/backend",
+    patches = [
+        "patches/0001-pin-go-toolchain.patch",
+        "patches/0002-drop-internal-telemetry.patch",
+    ],
+)

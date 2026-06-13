@@ -1,0 +1,20 @@
+Subject: [PATCH] pin Go toolchain to the version vendored in tinytree
+
+Upstream tracks the latest toolchain; the monorepo pins a specific version so
+all imported services build reproducibly. Candidate for upstreaming once acme
+adopts toolchain pinning.
+
+---
+diff --git a/go.mod b/go.mod
+index 1111111..2222222 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,6 +1,8 @@
+ module github.com/acme/backend
+
+ go 1.21
++
++toolchain go1.21.6
+
+ require (
+ 	github.com/spf13/cobra v1.8.0

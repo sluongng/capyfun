@@ -1,0 +1,22 @@
+[package]
+name = "capyfun"
+version = "0.0.0"
+edition = "2021"
+description = "Code import/export subsystem for the TinyTree monorepo (a Rust take on Copybara/ShipIt)."
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "capyfun"
+path = "src/main.rs"
+
+[lib]
+name = "capyfun"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[lints.clippy]
+all = "warn"

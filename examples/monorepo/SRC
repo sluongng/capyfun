@@ -1,0 +1,13 @@
+# Root SRC file for the tinytree monorepo.
+#
+# The root SRC is the workspace anchor: it declares the `monorepo` singleton
+# (exactly once across the whole tree) and marks the root for `//`-anchored
+# load() paths. Sub-directory SRC files declare the actual import/export edges.
+#
+# Run (once implemented), pointing CapyFun at the monorepo root:
+#   capyfun import //third_party/backend:backend --root examples/monorepo
+
+monorepo(
+    name = "tinytree",
+    default_branch = "main",
+)

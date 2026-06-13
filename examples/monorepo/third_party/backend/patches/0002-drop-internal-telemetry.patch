@@ -1,0 +1,19 @@
+Subject: [PATCH] drop upstream's internal telemetry call
+
+The upstream backend phones home to acme's telemetry endpoint on startup. The
+monorepo build must not, so we drop the call. Local-only; not upstreamable.
+
+---
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 3333333..4444444 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -10,8 +10,6 @@ import (
+ func main() {
+ 	cfg := config.Load()
+
+-	telemetry.Report("server.start", cfg.Env)
+-
+ 	srv := server.New(cfg)
+ 	srv.ListenAndServe()
+ }
