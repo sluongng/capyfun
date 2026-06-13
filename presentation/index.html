@@ -239,6 +239,7 @@ $ examples/transforms/materialize-widget.sh</code></pre>
       <li><span class="hl">go.mod → toolchain go1.21.6</span> — a tip patch layered on the faithful mirror</li>
     </ul>
     <div class="sub small">History preserved · every file traceable · reproducible — and the same engine runs an LLM transform.</div>
+    <div><a href="demo.html" style="color:var(--accent); font-weight:700; text-decoration:none; font-size:clamp(15px,1.8vw,22px)">▶ play the recording →</a></div>
   </section>
 
 </div>
@@ -273,7 +274,7 @@ $ examples/transforms/materialize-widget.sh</code></pre>
     else if(e.key==='s'){document.body.classList.toggle('notes-on');}
     else if(/^[1-9]$/.test(e.key)){show(+e.key-1);}
   });
-  document.addEventListener('click',e=>{ if(e.clientX < innerWidth*0.25) prev(); else next(); });
+  document.addEventListener('click',e=>{ if(e.target.closest('a')) return; if(e.clientX < innerWidth*0.25) prev(); else next(); });
   const start=parseInt(location.hash.slice(1));
   show(Number.isFinite(start)&&start>0?start-1:0);
 </script>
