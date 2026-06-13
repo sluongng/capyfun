@@ -25,18 +25,23 @@ emit() { # color, file, pattern: print matching lines, indented and colored
 printf '%s  MONOREPO%s  %sthird_party/widget  (live)%s\n\n' "$YEL" "$RST" "$DIM" "$RST"
 tree -C --noreport third_party/widget 2>/dev/null | sed 's/^/  /'
 
+W=third_party/widget/lib/widget.go
 echo
-printf '  %slib/widget.go import line:%s\n' "$CYN" "$RST"
-if [ -f third_party/widget/lib/widget.go ]; then
-    emit "$GRN" third_party/widget/lib/widget.go '^import'
+if [ -f "$W" ]; then
+    printf '  %slib/widget.go — first line (🤖 agent):%s\n' "$CYN" "$RST"
+    printf '    %s%s%s\n' "$GRN" "$(head -1 "$W")" "$RST"
+    printf '  %simport (replace scrubbed):%s\n' "$CYN" "$RST"
+    emit "$GRN" "$W" '^import'
 elif [ -f third_party/widget/pkg/widget.go ]; then
+    printf '  %spkg/widget.go import line:%s\n' "$CYN" "$RST"
     emit "$RED" third_party/widget/pkg/widget.go '^import'
 else
+    printf '  %slib/widget.go:%s\n' "$CYN" "$RST"
     printf '    %s(not imported yet)%s\n' "$DIM" "$RST"
 fi
 
 echo
-printf '  %sgo.mod toolchain:%s\n' "$CYN" "$RST"
+printf '  %sgo.mod toolchain (tip patch):%s\n' "$CYN" "$RST"
 if [ -f third_party/widget/go.mod ]; then
     emit "$GRN" third_party/widget/go.mod 'toolchain|^go '
 else

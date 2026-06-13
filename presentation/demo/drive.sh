@@ -42,21 +42,21 @@ $TM split-window -h -t "$S:0.0" -l 62% "bash --rcfile '$W/right.rc' -i"
   RP="$S:0.1"
   send(){ $TM send-keys -t "$RP" "$1" Enter; }
   sleep 2.5
-  send "# 1) the import + its transforms, declared as code"
-  sleep 1.2; send "cat third_party/widget/SRC"; sleep 6
+  send "# 1) the import + its transforms (structural, tip patch, AND a generative agent)"
+  sleep 1.2; send "cat third_party/widget/SRC"; sleep 7
   send "# 2) upstream BEFORE — code in pkg/, imports acme.internal/log"
   sleep 1.2; send "git -C '$ORIGINS/acme/widget' show main:pkg/widget.go | sed -n '4,7p'"; sleep 5.5
-  send "# 3) import it — transforms run as the mirror is built"
-  sleep 1.2; send "capyfun import //third_party/widget:widget"; sleep 3.5
-  send "# materialize the new tip into the working tree (watch the LEFT pane)"
-  sleep 1.2; send "git reset --hard main"; sleep 4.5
-  send "# 4) AFTER — moved pkg/ -> lib/, 'acme.internal/' scrubbed"
-  sleep 1.2; send "git show main:third_party/widget/lib/widget.go | sed -n '4,7p'"; sleep 5.5
+  send "# 3) import — structural transforms + apply_patch + a live agent_transform"
+  sleep 1.2; send "capyfun import //third_party/widget:widget"; sleep 18
+  send "# note: tip layer = 1 patch + 1 AGENT commit. materialize it (watch LEFT pane)"
+  sleep 1.5; send "git reset --hard main"; sleep 4.5
+  send "# 4) AFTER — pkg/->lib/, acme.internal/ scrubbed, + the agent's header line"
+  sleep 1.2; send "git show main:third_party/widget/lib/widget.go | sed -n '1,6p'"; sleep 6
   send "# 5) go.mod pinned by the tip apply_patch"
   sleep 1.2; send "git show main:third_party/widget/go.mod"; sleep 5
-  send "# 6) every commit maps back upstream via CapyFun-Origin"
-  sleep 1.2; send "git log main --format='%C(yellow)%h%C(reset) %s%n   %(trailers:key=CapyFun-Origin)' | sed '/^ *\$/d' | head -8"; sleep 7
-  send "# history preserved - every file traceable - reproducible."
+  send "# 6) provenance: CapyFun-Origin (mirror) + CapyFun-Agent (generative)"
+  sleep 1.2; send "git log main --format='%C(yellow)%h%C(reset) %s%n   %(trailers:key=CapyFun-Origin,key=CapyFun-Agent,separator=%x20)' | sed '/^ *\$/d' | head -10"; sleep 8
+  send "# imperative + generative — reproducible, every file traceable."
   sleep 4
   $TM kill-session -t "$S"
 ) &

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
 # Record the CapyFun import+transform demo to presentation/demo.cast.
-# Hermetic (no network) and reproducible. Requires: asciinema, tmux, tree, watch.
+#
+# The import runs structural + tip transforms AND a live `agent_transform`, so
+# recording needs a logged-in `claude` CLI and network (the agent call). The
+# resulting .cast is self-contained and plays offline. Requires: asciinema,
+# tmux, tree, watch, claude.
 #
 # Usage: presentation/demo/record.sh
 set -euo pipefail
