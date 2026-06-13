@@ -1,0 +1,14 @@
+# Import acme/greeter, then run the porter agent to migrate callers to the new
+# API. The agent's edits are materialized to a content-addressed patch, so the
+# expensive model only runs when the imported subtree or prompt changes.
+github_import(
+    name = "greeter",
+    repo = "acme/greeter",
+    ref = "refs/heads/main",
+    transforms = [
+        agent_transform(
+            agent = "//tools/agent:porter",
+            prompt = template("//tools/agent/prompts:port"),
+        ),
+    ],
+)

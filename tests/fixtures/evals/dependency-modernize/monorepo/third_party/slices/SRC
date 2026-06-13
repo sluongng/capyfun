@@ -1,0 +1,15 @@
+# Import acme/slices and run the modernizer agent under a verify->retry loop.
+# The agent edits, the verifier (go test) runs, and on failure its output is fed
+# back to the agent for one retry before the import aborts. The final, *verified*
+# state is what gets materialized to the content-addressed patch.
+github_import(
+    name = "slices",
+    repo = "acme/slices",
+    ref = "refs/heads/main",
+    transforms = [
+        agent_transform(
+            agent = "//tools/agent:modernizer",
+            prompt = template("//tools/agent/prompts:modernize"),
+        ),
+    ],
+)

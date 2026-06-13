@@ -44,8 +44,8 @@ If you run long, cut from slides 1 and 6 — never from slide 3.
 **Emphasis:** "agents propose, Bazel CI disposes" — this is your trust answer.
 
 ## Slide 6 — What's next · 0:10
-**Say:** "Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits."
-**Close line:** "Import runs end-to-end today; export is the next edge, and it reuses all the same machinery."
+**Say:** "Import and export both run end-to-end today, with agent transforms verified and cached. Next: scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits."
+**Close line:** "The round-trip works today; what's left is running it at fleet scale and reacting to more than commits."
 
 ---
 
@@ -56,30 +56,36 @@ If you run long, cut from slides 1 and 6 — never from slide 3.
 cd ~/work/misc/capyfun && cargo build --release && clear
 ```
 
-**Run one command:**
+**Run one command — the full loop (hermetic, no API key):**
 ```sh
-examples/transforms/materialize-widget.sh
+demo/full-loop.sh
 ```
 
-**Point at three beats (~15s each):**
-1. `imported 2 commit(s) … tip layer: 1 patch commit` → "a real import, not a squash."
-2. The history block — `CapyFun-Origin: <sha>` on each commit → "that's the commit map — provenance back to upstream."
-3. `go.mod` → `toolchain go1.21.6` → "a tip patch layered on top of the faithful mirror."
+**Point at the beats (~12s each):**
+1. STEP 1–2: upstream renames `Connect → New`; the import runs an **agent transform** to migrate the broken caller → "an agent edits code as a *config edge between repos*, not an ad-hoc Claude session."
+2. STEP 3: `go test` passes → "the agent is *verified*, with a fail→feed-back→retry loop behind it."
+3. STEP 4: export branch with the internal-only line scrubbed → "the other direction, as a PR — agents propose, review disposes."
+4. STEP 5 + SUMMARY: `replay … cache 1h/0m`, model calls 0, $0.00 → **"the expensive model runs once on a cache miss; every replay is deterministic and free."**
 
-**Close:** "History preserved, every file traceable, fully reproducible — and the same engine runs an LLM transform when you want one."
+**Close:** "Reproducible, reviewable, replayable LLM transforms across repo boundaries — the whole pitch, in one command."
 
-**Higher-risk alt (needs wifi):** `demo/run.sh` — lockfiles → `third_party/` tree (gen-cargo/npm → check → import/vendor). More impressive, but hits crates.io/npm/GitHub. Only if the network is solid.
+**Backup beat (provenance):** `CapyFun-Origin` on each mirror commit, `CapyFun-Agent` on the transform commit — every file traces back to its origin and the edge that produced it.
+
+**Measurable follow-up:** `scripts/eval-agents.sh` — the 3-fixture eval table (see `docs/evals.md`).
+
+**Alt demos:** `examples/transforms/materialize-widget.sh` (mirror + tip patch, no agent); `demo/run.sh` (multi-language vendoring — needs wifi).
 
 ---
 
 ## Q&A prep (anticipate these)
 
 - **"How is this different from Copybara/ShipIt?"** — "Same model — origin, destination, recorded reference — but a Rust rewrite with a *closed, typed* transform vocabulary instead of a big DSL, plus generative (agent) transforms that stay reproducible via content-addressing. And it's import/export for one monorepo, not a sync pipe."
-- **"Isn't letting an LLM rewrite code dangerous?"** — "Agents propose, Bazel CI disposes — every transform is verified imperatively, and the output is a content-addressed patch, so it's reviewable and reproducible, not a black box."
-- **"Is export working?"** — "Import runs end-to-end today, including agent transforms. Export is modeled in config and IR — same transforms apply — but the execution that opens the PR is my next milestone. It reuses the import machinery."
+- **"Isn't letting an LLM rewrite code dangerous?"** — "Agents propose, the verifier disposes — each transform runs a verifier (e.g. `go test`) with a fail→feed-back→retry loop, and only the *verified* state is materialized as a content-addressed patch. Reviewable and reproducible, not a black box."
+- **"Is export working?"** — "Yes — import *and* export run end-to-end today. Export strips the prefix, pushes a branch, and opens a PR (or prints the `gh` command for a local/hermetic destination). The full-loop demo shows both directions."
 - **"Why is import per-commit instead of a squash?"** — "Faithfulness: each mirrored commit maps 1:1 to its origin via the CapyFun-Origin trailer, so history and provenance survive, and re-import is incremental."
-- **"Determinism with a non-deterministic LLM?"** — "Generation happens once; we materialize the agent's edits to a content-addressed patch and replay *that*. Re-imports are reproducible from the record; `--refresh` regenerates."
-- **"What's actually built vs. designed?"** — "Built: import round-trip, imperative + generative transforms executing, vendoring, lockfile scaffolding, the GH-Archive event poller. 140+ tests. Designed/next: export PR, the acting reconciler, RBE scaling."
+- **"Determinism with a non-deterministic LLM?"** — "Generation happens once; we materialize the agent's edits to a content-addressed patch keyed on (input subtree, prompt, agent identity) and replay *that*. Re-imports are reproducible and free; `--refresh` regenerates. The eval harness proves it with a deterministic mock executor."
+- **"How do you show cost/quality?"** — "`scripts/eval-agents.sh` reports a table: success, verifier, runtime, replay time, and cache miss→hit. The model only runs on a cache miss; replays are $0.00."
+- **"What's actually built vs. designed?"** — "Built: import + export round-trip, imperative + generative transforms executing with a content-addressed cache, the verify→retry loop, three executors (local/remote-REAPI/fixture), an eval harness, the reconciler, vendoring, lockfile scaffolding, the GH-Archive poller. 220+ tests. Designed/next: broader triggers, richer source rules, fleet-scale quota/spend governance."
 
 ---
 

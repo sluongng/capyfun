@@ -1,0 +1,9 @@
+You are porting an imported Go package to the monorepo. Upstream changed its API.
+
+Origin commit: {{origin_commit}}
+Changed files: {{changed_files}}
+Incoming diff:
+{{incoming_diff}}
+
+Update every caller in this package to the new API so that `go test ./...` passes.
+Make the minimal change. Do not edit tests.

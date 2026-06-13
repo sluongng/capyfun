@@ -1,0 +1,5 @@
+model(name = "gpt55", provider = "openai", id = "gpt-5.5", credential = "env:OPENAI_API_KEY")
+model(name = "opus", provider = "anthropic", id = "claude-opus-4-8")
+
+agent(name = "porter", harness = "//tools/harness:codex", model = "//tools/agent:gpt55")
+agent(name = "modernizer", harness = "//tools/harness:claude_code", model = "//tools/agent:opus")

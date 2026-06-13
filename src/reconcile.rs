@@ -236,7 +236,22 @@ pub fn do_import(
                 t.agent_cache_misses
             ))
         }
-        _ => Ok("already up to date".to_owned()),
+        _ => {
+            // A no-op import still re-applies the tip layer, but every
+            // agent_transform is served from the content-addressed cache (no
+            // model call) — so the replay is deterministic and free. Surface that
+            // when the import has agent transforms; otherwise keep the bare
+            // phrasing relied on elsewhere.
+            let t = &outcome.tip;
+            if t.agent_cache_hits + t.agent_cache_misses > 0 {
+                Ok(format!(
+                    "already up to date (replayed tip from cache: {} agent, cache {}h/{}m)",
+                    t.agent_commits, t.agent_cache_hits, t.agent_cache_misses
+                ))
+            } else {
+                Ok("already up to date".to_owned())
+            }
+        }
     }
 }
 

@@ -1,4 +1,36 @@
-# Demo: multi-language dependencies as monorepo source
+# Demos
+
+## `full-loop.sh` — the whole story in one hermetic command (start here)
+
+```sh
+demo/full-loop.sh        # no API key, no network; ~1 min including build
+```
+
+Walks the complete loop end-to-end on local fixtures and prints a labeled summary:
+
+```text
+upstream change → import → agent transform → verifier → export → replay
+```
+
+- An upstream repo (`acme/greeter`) renames `Connect()` → `New()`, leaving an
+  in-package caller broken.
+- `capyfun import` mirrors the history, runs an **agent transform** to migrate the
+  caller, verifies with `go test`, and materializes the agent's edits to a
+  content-addressed patch.
+- `capyfun export` ships a monorepo path back out as a PR branch, scrubbing
+  internal-only lines.
+- Re-running the import is a **cache hit** — the agent does not run again (model
+  calls: 0, cost: $0.00).
+
+The agent runs through the **`fixture` executor**: a deterministic *mock* agent
+(recorded edits, no model, no network), clearly labeled as such. The same edge
+runs a real coding agent with `--executor local`. For the measurable eval table
+across 3 fixtures, see [`scripts/eval-agents.sh`](../scripts/eval-agents.sh) and
+[`docs/evals.md`](../docs/evals.md).
+
+---
+
+## `run.sh` — multi-language dependencies as monorepo source
 
 This demo shows CapyFun as a history-preserving alternative to per-language
 vendoring (`go mod vendor`, `cargo vendor`, `node_modules`). Third-party

@@ -252,6 +252,46 @@ The materialized patch is the durable artifact; it is what gets committed (with 
 `CapyFun-Agent` trailer) and what an incremental import replays. Thus an import
 is reproducible from the cache even though generation is not.
 
+A no-op re-import still re-applies the tip layer, but every `agent_transform` is
+served from the cache (no model call), so the engine reports it explicitly, e.g.
+`already up to date (replayed tip from cache: 1 agent, cache 1h/0m)`. This is the
+visible cost signal: the expensive model runs only on a cache **miss**.
+
+### The verify → retry loop
+
+An agent transform is verified, not trusted. The engine can wrap the agent runner
+in a verify → retry loop:
+
+```text
+agent edits → verifier runs → if failed, feed stderr+diff back → retry → materialize final patch
+```
+
+After the agent edits the checked-out subtree, a verifier command (e.g. `go test
+./...`, `cargo test`) runs in that working directory. On failure, its combined
+output is appended to the prompt and the agent runs again, up to a retry budget,
+before the import aborts. Crucially, the cache key is computed from the *original*
+rendered prompt, so the fed-back feedback never changes cache identity — the
+patch that gets materialized is the **verified, final** state, and replays stay
+both correct and free. See `VerifyingRunner` in `src/engine/agent_exec.rs`.
+
+### Executors: where an agent runs
+
+Agent execution sits behind one trait (`AgentRunner`), so *where* a transform runs
+is a swappable backend chosen per run with `--executor`:
+
+| Executor | Runner | Behavior |
+|----------|--------|----------|
+| `local` (default) | `LiveRunner` | shells out to the harness CLI in the subtree checkout |
+| `remote` | `RemoteRunner` | runs the harness as a REAPI Action on BuildBuddy; Action-Cache–served (see `remote-execution.md`) |
+| `fixture` | `FixtureRunner` | a deterministic *mock*: runs a recorded script instead of a model — no model, no network, zero cost |
+
+The fixture executor exists so the full materialize → diff → cache → replay loop
+(and the verify → retry loop) can run hermetically in demos, evals, and CI without
+model access. It exercises the exact production code path; only the in-workdir edit
+is recorded rather than generated. Configured via `CAPYFUN_AGENT_FIXTURE` (script
+directory), `CAPYFUN_VERIFY` (verifier command), and `CAPYFUN_VERIFY_RETRIES`. See
+`docs/evals.md` and `tests/fixtures/evals/`.
+
 ### Credentials
 
 Generative transforms call provider APIs, so they need credentials — but config

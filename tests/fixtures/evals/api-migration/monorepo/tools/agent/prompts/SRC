@@ -1,0 +1,2 @@
+prompt_template(name = "port", src = "port.tmpl")
+prompt_template(name = "modernize", src = "modernize.tmpl")

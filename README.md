@@ -111,8 +111,29 @@ An agent transform's output is captured as a **content-addressed patch**, so:
 - you can **replay your history through different agents/models** to benchmark
   cost, speed, and quality, and `git bisect` to find regressions.
 
-**Agents propose, Bazel CI disposes** — transformed changes are verified
-imperatively; nothing is trusted blindly.
+**Agents propose, the verifier disposes** — nothing is trusted blindly. An agent
+transform runs inside an explicit verify → retry loop:
+
+```text
+agent edits → verifier runs → if failed, feed stderr+diff back → retry once → materialize final patch
+```
+
+The verifier is any command (`go test ./...`, `cargo test`, a fixture check). On
+failure its output is appended to the prompt and the agent retries; only the
+**verified** final state is materialized to the cache. So replays are correct
+*and* free. (See [`VerifyingRunner`](src/engine/agent_exec.rs).)
+
+Where an agent runs is a swappable backend behind one trait — pick per run with
+`--executor`:
+
+| Executor | Runs the harness… | Use for |
+|----------|-------------------|---------|
+| `local` (default) | on this machine (logged-in `claude`/`codex`/`agy`, or an API key) | real transforms |
+| `remote` | as a REAPI Action on BuildBuddy, Action-Cache–served | fleet scale, shared cache |
+| `fixture` | as a deterministic recorded mock (no model, no network) | hermetic demos, evals, CI |
+
+Because agent output is content-addressed, identical `(input, agent, model,
+prompt)` work dedups for free — locally or across a remote fleet.
 
 ### Example use cases
 
@@ -125,36 +146,75 @@ Same vocabulary, both directions.
 
 ---
 
-## Quickstart
+## 30-second pitch
 
-Requires a recent Rust toolchain (and `git`). `gh` is only needed to open real
-PRs on export.
+> **CapyFun makes LLM code transforms reproducible, reviewable, and replayable
+> across Git repo boundaries.** It imports/exports code between repos, applies
+> agent transforms inside a closed typed vocabulary, **verifies** them, and
+> materializes each one to a **content-addressed patch** — so the expensive model
+> runs only when the input changes and every replay is deterministic and free.
+
+Compared with running Claude Code / Cursor / Codex ad-hoc on a repo: those produce
+a one-off diff with no provenance, no cache, and no replay. CapyFun makes the
+transform a typed config edge with a `CapyFun-Agent` trailer, a verifier, and a
+cache key — so it can be reviewed, re-run through a different model, bisected, and
+re-imported at zero cost. Compared with Copybara/JOSH/git-filter-repo: same
+origin/destination/commit-map discipline, but a Rust core with generative
+transforms that stay reproducible.
+
+## Quickstart — the full loop in under 3 minutes
+
+Requires a recent Rust toolchain, `git`, and `go` (the demo's verifier). No API
+key and no network needed — the demo's agent runs as a deterministic **mock**.
 
 ```sh
-# build
 cargo build --release
 
-# evaluate the config and print the validated IR for an example
-./target/release/capyfun check --root examples/transforms
+# The whole loop, hermetic: upstream change → import → agent transform →
+# verifier → export PR branch → free cache-hit replay.
+demo/full-loop.sh
 
-# run the hermetic demo: builds a local upstream and runs a real import
-# (no network — imports 2 commits + a tip patch into third_party/widget)
-examples/transforms/materialize-widget.sh
+# The measurable eval table across 3 fixtures (doubles as a test).
+scripts/eval-agents.sh
 ```
 
-What the demo shows:
+`demo/full-loop.sh` prints a labeled summary:
 
-- `imported 2 commit(s) · tip: 1 patch` — a real import, not a squash.
-- `CapyFun-Origin: <sha>` on every commit — the commit map / provenance.
-- `go.mod → toolchain go1.21.6` — a tip patch layered on the faithful mirror.
+```text
+Imported:            2 upstream commits (first-parent mirror, history preserved)
+Agent:               codex + gpt-5.5 (fixture/mock)
+Patch cache:         miss first run (1 agent call), hit second run (1 cache hit)
+Verifier:            pass   (go test ./..., with one verify→retry loop available)
+Export:              branch 'capyfun/export-go-sdk' produced (internal-only scrubbed)
+First run time:      141 ms   (import + agent + verifier)
+Replay time:         27 ms    (deterministic, cache-served)
+Model calls (real):  0   — the fixture/mock agent makes no model calls
+Estimated model cost: $0.00 (mock).  The expensive model only runs on a
+                     content-addressed cache MISS; every replay is free.
+```
 
-Hermetic smoke tests (build a local origin/destination in a temp dir, no
-network):
+Other hermetic entry points (no network):
 
 ```sh
-scripts/smoke-import.sh
-scripts/smoke-export.sh
+./target/release/capyfun check --root examples/transforms  # config → validated IR
+examples/transforms/materialize-widget.sh                  # a real import (mirror + tip patch)
+scripts/smoke-import.sh ; scripts/smoke-export.sh          # import/export round-trip in a temp dir
 ```
+
+## Measurable results
+
+See [`docs/evals.md`](docs/evals.md). The eval harness runs three fixtures through
+the real engine with the hermetic mock agent and reports a table:
+
+| Fixture | Result | Verifier | Cache | Model calls | Est. cost |
+|---------|--------|----------|-------|------------:|-----------|
+| api-migration | ✅ pass | `go test ./...` | miss → hit | 1 (mock) | $0.00 |
+| dependency-modernize | ✅ pass (via verify→retry) | `go test ./...` | miss → hit | 1 (mock) | $0.00 |
+| oss-export-scrub | ✅ pass, scrubbed | `go build ./...` | n/a (no agent) | 0 | $0.00 |
+
+The key result: **model calls happen once per unique `(input subtree, prompt,
+agent identity)`; every replay is a content-addressed cache hit and is free.**
+220+ `cargo test` tests cover the runner/cache/retry logic and the engine.
 
 ---
 
@@ -168,7 +228,7 @@ capyfun <command>
 |---------|--------------|
 | `config` | Discover and evaluate `SRC` files; list the captured rules. |
 | `check` | Evaluate → lower to IR → statically validate; print the IR as JSON. |
-| `import <label>` | Replay an external repo's commits into a monorepo path (`--refresh` re-runs agent transforms). |
+| `import <label>` | Replay an external repo's commits into a monorepo path (`--refresh` re-runs agent transforms; `--executor local\|remote\|fixture` selects where they run). |
 | `vendor <label>` | Vendor a pinned single-commit snapshot of a `git_repository` rule. |
 | `export <label>` | Strip the prefix, push a branch, and open a GitHub PR (`--no-pr` to skip PR creation). |
 | `gen-go` | Scaffold import `SRC` files from a `go.mod` / `go.sum`. |
@@ -334,13 +394,19 @@ load-bearing record — the only thing that changes is *where* the work runs and
 A hackathon project, biased toward small, runnable, tested milestones.
 
 - **Built today:** import round-trip (mirror + tip layers), imperative and
-  generative (agent) transforms executing, vendoring, lockfile scaffolding
-  (`gen-go` / `gen-cargo` / `gen-npm`), export (branch push + commit map + PR),
-  and a GH-Archive automation poller. 150+ tests.
-- **Next:** the acting reconciler, scaling transforms onto Bazel RBE + remote
-  cache (dedup is free because output is content-addressed), broader triggers
-  (bug reports, metric anomalies, production alerts), and richer source rules
-  (import by commit/tag, export straight to main).
+  generative (agent) transforms executing with a content-addressed cache, the
+  **verify → retry agent loop**, three executors (local / remote-REAPI /
+  hermetic fixture), an **eval harness** with measurable results
+  ([`docs/evals.md`](docs/evals.md)), a level-triggered reconciler, vendoring,
+  lockfile scaffolding (`gen-go` / `gen-cargo` / `gen-npm`), export (branch push
+  + commit map + PR), a GH-Archive automation poller, and a REAPI/BuildBuddy
+  remote executor for agent transforms. 220+ tests.
+- **Next:** broader triggers (bug reports, metric anomalies, production alerts),
+  richer source rules (import by commit/tag, export straight to main), and
+  fleet-scale orchestration with quota/spend governance.
+
+For judges: [`docs/hackathon-judging.md`](docs/hackathon-judging.md) maps the repo
+to the rubric.
 
 Run `cargo test` and `cargo clippy` before finishing a milestone.
 

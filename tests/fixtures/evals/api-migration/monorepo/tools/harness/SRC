@@ -1,0 +1,6 @@
+# Agent harnesses + the models they drive, paired into agents. In a real run
+# these select a live CLI (claude/codex/agy) or HTTP model; under the hermetic
+# `fixture` executor the pairing is recorded but a deterministic mock script runs
+# instead (see tests/fixtures/evals/<fixture>/agent/<name>.sh).
+harness(name = "codex", kind = "codex")            # OpenAI + open models
+harness(name = "claude_code", kind = "claude_code") # Anthropic models
