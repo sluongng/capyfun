@@ -6,7 +6,7 @@
 #
 # Patch paths are relative to this SRC file.
 
-load("//lib/github.star", "vendored")
+load("//lib/github.scl", "vendored")
 
 vendored(
     name = "backend",

@@ -1,0 +1,19 @@
+# LLMs. Package //tools/models.
+
+model(
+    name = "opus",
+    provider = "anthropic",
+    id = "claude-opus-4-8",
+)
+
+model(
+    name = "gpt55",
+    provider = "openai",
+    id = "gpt-5.5",
+)
+
+model(
+    name = "nemotron",
+    provider = "nebius",
+    id = "nvidia/nemotron-3-ultra",
+)

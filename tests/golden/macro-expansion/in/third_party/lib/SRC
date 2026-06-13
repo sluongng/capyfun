@@ -1,2 +1,2 @@
-load("//lib/gh.star", "vendored")
+load("//lib/gh.scl", "vendored")
 vendored(name = "lib", repo = "acme/lib")

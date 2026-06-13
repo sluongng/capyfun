@@ -1,0 +1,34 @@
+# Agents = harness + model. Package //tools/agent.
+#
+# Each agent pairs a harness (//tools/harness) with a model (//tools/models).
+# A harness can only drive models it supports (CapyFun validates the pairing):
+# `claude_code` runs Anthropic models; `codex` and `pi` run OpenAI and other
+# open models.
+
+# Claude Code + Anthropic Opus.
+agent(
+    name = "reviewer",
+    harness = "//tools/harness:claude_code",
+    model = "//tools/models:opus",
+)
+
+# GPT-5.5 (OpenAI) under Codex.
+agent(
+    name = "porter",
+    harness = "//tools/harness:codex",
+    model = "//tools/models:gpt55",
+)
+
+# The same GPT-5.5 model under Pi instead.
+agent(
+    name = "scout",
+    harness = "//tools/harness:pi",
+    model = "//tools/models:gpt55",
+)
+
+# Nemotron-3 Ultra (served by Nebius) under Pi.
+agent(
+    name = "modernizer",
+    harness = "//tools/harness:pi",
+    model = "//tools/models:nemotron",
+)

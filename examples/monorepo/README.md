@@ -1,7 +1,7 @@
 # Example: a CapyFun mini-monorepo
 
 This is a small but realistic monorepo layout showing CapyFun's config model:
-distributed `SRC` files (Bazel packages), `.star` libraries loaded via `load()`,
+distributed `SRC` files (Bazel packages), `.scl` libraries loaded via `load()`,
 a GitHub import via a macro, and a local patch series.
 
 ## Layout
@@ -10,7 +10,7 @@ a GitHub import via a macro, and a local patch series.
 examples/monorepo/
 ├── SRC                                  # root: workspace anchor + monorepo()
 ├── lib/
-│   └── github.star                      # library: `vendored` macro (like .bzl)
+│   └── github.scl                      # library: `vendored` macro (like .bzl)
 └── third_party/
     └── backend/
         ├── SRC                          # package //third_party/backend
@@ -22,8 +22,8 @@ examples/monorepo/
 ## Config model (mirrors Bazel's BUILD / .bzl split)
 
 - **SRC files** *instantiate* source rules. Like `BUILD`. The file named `SRC`.
-- **`.star` libraries** define reusable macros and constants, loaded via
-  `load("//path/to/lib.star", "symbol")`. Like `.bzl`. They never instantiate
+- **`.scl` libraries** define reusable macros and constants, loaded via
+  `load("//path/to/lib.scl", "symbol")`. Like `.bzl`. They never instantiate
   rules themselves (a top-level builtin call in a library is an error).
 - **Builtins are the only rules**: `monorepo`, `github_import`, `github_export`.
   Macros are pure composition sugar — they expand to builtin calls and add no

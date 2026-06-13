@@ -4,7 +4,7 @@ CapyFun can transform code as it moves across a tree boundary. This document
 specifies the transformation system: what transforms exist, when they apply, and
 how the generative (coding-agent) transforms stay reproducible.
 
-Read `../../CLAUDE.md` first for the project thesis and the SRC/`.star` config
+Read `../../CLAUDE.md` first for the project thesis and the SRC/`.scl` config
 model. This doc assumes the import mirror/patch model already described there.
 
 ## Principles (and how they reconcile with the invariants)
@@ -33,7 +33,7 @@ The config has two kinds of typed builtins:
   `monorepo`, `github_import`, `github_export`, and the agent tool rules
   `harness`, `model`, `agent`.
 - **Value constructors** are pure functions that *return a typed value* and may
-  be used anywhere (including `.star` libraries, e.g. to define reusable
+  be used anywhere (including `.scl` libraries, e.g. to define reusable
   transform constants): the transform constructors `replace`, `move`, `copy`,
   `apply_patch`, `rewrite_message`, `agent_transform`, and the `template`
   helper. They record nothing, so the "no top-level rule instantiation in a
@@ -51,7 +51,7 @@ github_import(
         move(src = "pkg", dst = "lib"),
         rewrite_message(strip_trailers = ["Internal-Review"]),
         apply_patch("patches/0001-pin-toolchain.patch"),
-        agent_transform(agent = "//tools/agents:reviewer", prompt = template(...)),
+        agent_transform(agent = "//tools/agent:reviewer", prompt = template(...)),
     ],
 )
 ```
@@ -139,9 +139,9 @@ change, and captures the agent's edits as a patch in the tip layer.
 
 ```python
 agent_transform(
-    agent = "//tools/agents:reviewer",     # an `agent` rule, by label
+    agent = "//tools/agent:reviewer",      # an `agent` rule, by label
     prompt = template(
-        "//tools/agents/prompts:port.tmpl",
+        "//tools/agent/prompts:port.tmpl",
         vars = {"style": "//docs:STYLE.md"},
     ),
     paths = ["lib/**"],                     # optional scope; default = whole subtree
@@ -153,20 +153,24 @@ agent_transform(
 Agents are modeled as composable tool rules, declared in a tools package and
 referenced by label:
 
+Harnesses, models, and agents live in sibling packages so labels read clearly:
+
 ```python
-# //tools/agents/SRC
-harness(
-    name = "cc",
-    kind = "claude_code",                   # claude_code | codex | pi | ...
-    plugins = ["//tools/plugins:bazel"],    # runfiles
-    skills = ["//tools/skills:review"],     # runfiles
-)
-model(
-    name = "opus48",
-    provider = "anthropic",                 # anthropic | openai | ...
-    id = "claude-opus-4-8",
-)
-agent(name = "reviewer", harness = ":cc", model = ":opus48")
+# //tools/harness/SRC
+harness(name = "claude_code", kind = "claude_code",
+        plugins = ["//tools/plugins:bazel"], skills = ["//tools/skills:review"])
+harness(name = "codex", kind = "codex")
+harness(name = "pi", kind = "pi")
+
+# //tools/models/SRC
+model(name = "opus", provider = "anthropic", id = "claude-opus-4-8")
+model(name = "gpt55", provider = "openai", id = "gpt-5.5")
+model(name = "nemotron", provider = "nebius", id = "nvidia/nemotron-3-ultra")
+
+# //tools/agent/SRC
+agent(name = "reviewer", harness = "//tools/harness:claude_code", model = "//tools/models:opus")
+agent(name = "porter",   harness = "//tools/harness:codex",       model = "//tools/models:gpt55")
+agent(name = "scout",    harness = "//tools/harness:pi",          model = "//tools/models:gpt55")
 ```
 
 - A **harness** is the agent runtime (Claude Code, Codex, Pi, …). It carries
@@ -178,7 +182,7 @@ agent(name = "reviewer", harness = ":cc", model = ":opus48")
 Not every harness can drive every model. `claude_code` runs Anthropic models;
 `codex` and `pi` run OpenAI and other open models (e.g. NVIDIA Nemotron served by
 Nebius). An `agent` whose harness cannot drive its model is a validation error.
-See `examples/transforms/tools/agents/SRC` for a worked set.
+See `examples/transforms/tools/{harness,models,agent}/SRC` for a worked set.
 
 The agent's identity for caching is `(harness kind, plugins digests, skills
 digests, model provider+id)`.

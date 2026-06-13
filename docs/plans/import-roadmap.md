@@ -27,8 +27,8 @@ round-trip (M3–M5) works.
   Copybara — declare edges, not transforms. GitHub-first builtins: `monorepo`,
   `github_import`, `github_export`.
 - **Config files (Bazel-shaped):** rules are instantiated in `SRC` files (the
-  `BUILD` analogue); `.star` libraries (the `.bzl` analogue) define macros +
-  constants and are pulled in with `load("//path/to/lib.star", "sym")`.
+  `BUILD` analogue); `.scl` libraries (the `.bzl` analogue) define macros +
+  constants and are pulled in with `load("//path/to/lib.scl", "sym")`.
   Libraries never instantiate rules. Macros expand to builtins only (no custom
   `rule()` yet).
 - **Distributed packages:** every `SRC` file under the monorepo root is a
@@ -78,7 +78,7 @@ round-trip (M3–M5) works.
   declaring SRC package. Pure, no I/O. `github_import` fields: `name`,
   `repo` ("owner/name"), `ref`, optional `into` (subpath within the package),
   optional `patches` (list of paths relative to the SRC file).
-- `load("//path/to/lib.star", "sym")` resolves `//` to the monorepo root (the
+- `load("//path/to/lib.scl", "sym")` resolves `//` to the monorepo root (the
   dir holding the root SRC). Libraries may define macros/constants but a
   top-level builtin call in a library errors.
 - Discover every `SRC` file under a root; evaluate each as a package.

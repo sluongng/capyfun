@@ -2,7 +2,7 @@
 //!
 //! Each case is a directory `tests/golden/<case>/` containing:
 //!
-//! - `in/` — a monorepo tree (SRC files and `.star` libraries) to evaluate.
+//! - `in/` — a monorepo tree (SRC files and `.scl` libraries) to evaluate.
 //! - **eval-stage** golden (always one):
 //!   - `expected.json` — captured config as JSON (evaluation succeeded), or
 //!   - `expected.err`  — the error chain text (evaluation failed).

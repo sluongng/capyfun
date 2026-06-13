@@ -1,0 +1,22 @@
+# Agent harnesses (runtimes). Package //tools/harness.
+#
+# A harness carries its plugins/skills as runfiles. Its `kind` determines which
+# models it can drive (see //tools/agent).
+
+harness(
+    name = "claude_code",
+    kind = "claude_code",                  # Anthropic models
+    plugins = ["//tools/plugins:bazel"],   # runfiles (plugin targets, T4+)
+    skills = ["//tools/skills:review"],     # runfiles (skill targets, T4+)
+)
+
+harness(
+    name = "codex",
+    kind = "codex",                        # OpenAI + open models
+)
+
+harness(
+    name = "pi",
+    kind = "pi",                           # OpenAI + open models
+    skills = ["//tools/skills:review"],
+)

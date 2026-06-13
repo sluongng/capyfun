@@ -8,8 +8,8 @@
 //!
 //! - **SRC files** (literally named `SRC`) *instantiate* rules. Each one is a
 //!   package at its directory.
-//! - **`.star` libraries** define macros and constants, loaded via
-//!   `load("//path/to/lib.star", "sym")`. They never instantiate rules — a
+//! - **`.scl` libraries** define macros and constants, loaded via
+//!   `load("//path/to/lib.scl", "sym")`. They never instantiate rules — a
 //!   top-level builtin call in a library is an error.
 //!
 //! The root SRC declares the singleton `monorepo` and anchors `//` load paths.
@@ -106,7 +106,7 @@ pub struct RawConfig {
 /// Mutable state threaded through one module evaluation via `eval.extra`.
 #[derive(Debug, ProvidesStaticType)]
 struct EvalState {
-    /// True while evaluating a `.star` library; builtins error in this mode.
+    /// True while evaluating a `.scl` library; builtins error in this mode.
     is_library: bool,
     /// Label of the package being evaluated, e.g. `//third_party/backend`.
     package: String,
@@ -117,7 +117,7 @@ impl EvalState {
     fn record(&self, decl: Decl) -> Result<()> {
         if self.is_library {
             bail!(
-                "rule `{}` cannot be instantiated in a .star library; \
+                "rule `{}` cannot be instantiated in a .scl library; \
                  instantiate rules in SRC files (libraries define macros only)",
                 decl.kind()
             );
@@ -232,7 +232,7 @@ impl<'a> CapyLoader<'a> {
         }
     }
 
-    /// Evaluate a `.star` library file into a frozen module (library mode).
+    /// Evaluate a `.scl` library file into a frozen module (library mode).
     fn eval_library(&self, abs: &Path, module_id: &str) -> Result<FrozenModule> {
         let src = fs::read_to_string(abs)
             .with_context(|| format!("reading library `{module_id}` at {}", abs.display()))?;

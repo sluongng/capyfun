@@ -71,12 +71,12 @@ fn macro_in_library_expands_under_caller_package() {
     let (_dir, root) = write_tree(&[
         ("SRC", "monorepo(name = \"m\", default_branch = \"main\")\n"),
         (
-            "lib/gh.star",
+            "lib/gh.scl",
             "def vendored(name, repo):\n    github_import(name = name, repo = repo)\n",
         ),
         (
             "third_party/x/SRC",
-            "load(\"//lib/gh.star\", \"vendored\")\nvendored(name = \"x\", repo = \"acme/x\")\n",
+            "load(\"//lib/gh.scl\", \"vendored\")\nvendored(name = \"x\", repo = \"acme/x\")\n",
         ),
     ]);
     let cfg = evaluate(&root).unwrap();
@@ -121,9 +121,9 @@ fn explicit_into_and_export_are_captured() {
 #[test]
 fn top_level_builtin_in_library_errors() {
     let (_dir, root) = write_tree(&[
-        ("SRC", "load(\"//lib/bad.star\", \"x\")\nx()\n"),
+        ("SRC", "load(\"//lib/bad.scl\", \"x\")\nx()\n"),
         (
-            "lib/bad.star",
+            "lib/bad.scl",
             // Top-level builtin call in a library is forbidden.
             "github_import(name = \"oops\", repo = \"o/r\")\ndef x():\n    pass\n",
         ),
@@ -131,7 +131,7 @@ fn top_level_builtin_in_library_errors() {
     let err = evaluate(&root).unwrap_err();
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("cannot be instantiated in a .star library"),
+        msg.contains("cannot be instantiated in a .scl library"),
         "unexpected error: {msg}"
     );
 }
@@ -160,8 +160,8 @@ fn unknown_field_errors() {
 #[test]
 fn non_anchored_load_path_errors() {
     let (_dir, root) = write_tree(&[
-        ("SRC", "load(\"lib/gh.star\", \"vendored\")\n"),
-        ("lib/gh.star", "def vendored():\n    pass\n"),
+        ("SRC", "load(\"lib/gh.scl\", \"vendored\")\n"),
+        ("lib/gh.scl", "def vendored():\n    pass\n"),
     ]);
     let err = evaluate(&root).unwrap_err();
     let msg = format!("{err:#}");

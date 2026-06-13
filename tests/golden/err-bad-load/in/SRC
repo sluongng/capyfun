@@ -1,1 +1,1 @@
-load("lib/x.star", "y")
+load("lib/x.scl", "y")

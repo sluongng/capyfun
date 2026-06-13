@@ -5,7 +5,7 @@ Each subdirectory is one golden case for the config evaluator, consumed by
 
 ```text
 <case>/
-├── in/            # a monorepo tree (SRC files + .star libraries) to evaluate
+├── in/            # a monorepo tree (SRC files + .scl libraries) to evaluate
 └── expected.json  # captured config as JSON  (success cases)
     # or
     expected.err   # error chain text          (failure cases)
