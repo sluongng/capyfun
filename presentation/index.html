@@ -76,6 +76,9 @@
          padding:14px 18px; font-size:15px; line-height:1.45; color:#cdd6e0; display:none}
   body.notes-on .notes{display:block}
 
+  .avatar{position:absolute; top:8vh; right:8vw;
+    width:clamp(96px,13vw,200px); aspect-ratio:1; border-radius:50%; object-fit:cover;
+    border:3px solid var(--accent); box-shadow:0 12px 44px rgba(0,0,0,.55)}
   .title-wrap{gap:1.2vh}
   .title-wrap .logo{font-size:clamp(48px,9vw,128px); font-weight:900; letter-spacing:-.04em}
   .title-wrap .logo .fun{color:var(--accent)}
@@ -94,6 +97,7 @@
 
   <!-- 1 — TITLE / INTRO -->
   <section class="slide title-wrap" data-notes="I'm Son. At BuildBuddy I help big companies run Bazel in huge monorepos. On the side I'm building tinytree — a forge made for monorepos. This is its import/export engine, CapyFun.">
+    <img class="avatar" src="profile.jpeg" alt="Son Luong" />
     <div class="kicker">tinytree.dev</div>
     <div class="logo">Capy<span class="fun">Fun</span></div>
     <div class="lede sub">The code <b style="color:var(--fg)">import / export</b> engine for monorepos.</div>
