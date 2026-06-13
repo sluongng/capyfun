@@ -2,14 +2,21 @@
 #
 # Each agent pairs a harness (//tools/harness) with a model (//tools/models).
 # A harness can only drive models it supports (CapyFun validates the pairing):
-# `claude_code` runs Anthropic models; `codex` and `pi` run OpenAI and other
-# open models.
+# `claude_code` runs Anthropic models; `antigravity` runs Google Gemini models;
+# `codex` and `pi` run OpenAI and other open models.
 
 # Claude Code + Anthropic Opus.
 agent(
     name = "reviewer",
     harness = "//tools/harness:claude_code",
     model = "//tools/models:opus",
+)
+
+# Antigravity (`agy`) + Gemini 3.5 Flash (High).
+agent(
+    name = "triager",
+    harness = "//tools/harness:antigravity",
+    model = "//tools/models:gemini_flash",
 )
 
 # GPT-5.5 (OpenAI) under Codex.

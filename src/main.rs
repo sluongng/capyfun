@@ -33,6 +33,31 @@ enum Command {
     Export(ExportArgs),
     /// Run the automation server: poll GH Archive and host the webhook endpoint.
     Serve(ServeArgs),
+    /// Run a coding-agent harness over a prompt (proof of the agent_transform path).
+    AgentRun(AgentRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct AgentRunArgs {
+    /// Prompt to send to the agent. If omitted, read from stdin.
+    #[arg(long)]
+    prompt: Option<String>,
+    /// Harness runtime to drive: claude_code, codex, antigravity, or pi.
+    #[arg(long, default_value = "claude_code")]
+    harness: String,
+    /// Model provider (selects the conventional credential env var).
+    #[arg(long, default_value = "anthropic")]
+    provider: String,
+    /// Model id passed to the harness (e.g. claude-opus-4-8). Optional.
+    #[arg(long)]
+    model: Option<String>,
+    /// Credential reference, e.g. `env:ANTHROPIC_API_KEY`. Defaults to the
+    /// provider's conventional env var; claude_code falls through to CLI login.
+    #[arg(long)]
+    credential: Option<String>,
+    /// OpenAI-compatible base URL for the `pi` harness (defaults per provider).
+    #[arg(long)]
+    base_url: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -117,7 +142,56 @@ fn main() -> Result<()> {
         Command::Vendor(args) => run_vendor(args),
         Command::Export(args) => run_export(args),
         Command::Serve(args) => run_serve(args),
+        Command::AgentRun(args) => run_agent_run(args),
     }
+}
+
+fn run_agent_run(args: AgentRunArgs) -> Result<()> {
+    use std::io::Read;
+
+    let harness = capyfun::agent::HarnessKind::parse(&args.harness)?;
+
+    let prompt = match args.prompt {
+        Some(p) => p,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("reading prompt from stdin")?;
+            let buf = buf.trim().to_string();
+            if buf.is_empty() {
+                bail!("no prompt given (pass --prompt or pipe text on stdin)");
+            }
+            buf
+        }
+    };
+
+    let run = capyfun::agent::AgentRun {
+        harness,
+        provider: args.provider,
+        model_id: args.model,
+        credential: args.credential,
+        base_url: args.base_url,
+        prompt,
+    };
+
+    let out = capyfun::agent::run_agent(&run)?;
+    match &out.credential {
+        capyfun::agent::Credential::Resolved { var } => {
+            eprintln!("credential: resolved from ${var}");
+        }
+        capyfun::agent::Credential::Ambient => {
+            eprintln!(
+                "credential: none set; using the {} harness's own login",
+                harness.as_str()
+            );
+        }
+    }
+    print!("{}", out.stdout);
+    if !out.stdout.ends_with('\n') {
+        println!();
+    }
+    Ok(())
 }
 
 fn run_serve(args: ServeArgs) -> Result<()> {

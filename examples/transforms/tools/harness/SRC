@@ -16,6 +16,11 @@ harness(
 )
 
 harness(
+    name = "antigravity",
+    kind = "antigravity",                  # Google Gemini models (the `agy` CLI)
+)
+
+harness(
     name = "pi",
     kind = "pi",                           # OpenAI + open models
     skills = ["//tools/skills:review"],

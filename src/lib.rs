@@ -11,6 +11,7 @@
 //!
 //! Config evaluation is pure; all Git and network I/O lives in [`engine`].
 
+pub mod agent;
 pub mod cargo;
 pub mod config;
 pub mod engine;

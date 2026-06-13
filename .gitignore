@@ -1,3 +1,8 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+
+# Local API credentials for agent-run / run-agents.sh (never commit secrets).
+secrets.env
+.env
+.env.local

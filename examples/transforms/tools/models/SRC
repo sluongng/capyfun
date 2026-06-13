@@ -1,19 +1,41 @@
 # LLMs. Package //tools/models.
+#
+# Credentials are never values in config (config evaluation is pure — no
+# secrets). A model carries at most a `credential` *reference* — a name the
+# engine resolves at execution time and injects into the harness subprocess.
+#
+# Default (no `credential` field): the provider maps to a conventional env var
+#   anthropic -> ANTHROPIC_API_KEY   openai -> OPENAI_API_KEY
+#   nebius    -> NEBIUS_API_KEY
+# so the common case is "just export the env var." For `claude_code`, if no key
+# is resolved the harness falls through to the CLI's own login (keyring/session).
+# Set `credential = "env:NAME"` only to override the conventional name (e.g. to
+# pick a specific account). The `env:` scheme is extensible (file:, secret mgr).
 
 model(
     name = "opus",
     provider = "anthropic",
     id = "claude-opus-4-8",
+    # default credential: env:ANTHROPIC_API_KEY (or ambient `claude` login)
 )
 
 model(
     name = "gpt55",
     provider = "openai",
     id = "gpt-5.5",
+    credential = "env:OPENAI_API_KEY",   # explicit; same as the default
+)
+
+model(
+    name = "gemini_flash",
+    provider = "google",
+    id = "Gemini 3.5 Flash (High)",      # as named by the antigravity (`agy`) CLI
+    # default credential: env:GEMINI_API_KEY (or ambient `agy` login)
 )
 
 model(
     name = "nemotron",
     provider = "nebius",
-    id = "nvidia/nemotron-3-ultra",
+    id = "nvidia/Nemotron-3-Ultra-550b-a55b",   # as served by Nebius Token Factory
+    credential = "env:NEBIUS_API_KEY",
 )

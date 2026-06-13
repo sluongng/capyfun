@@ -160,28 +160,32 @@ Harnesses, models, and agents live in sibling packages so labels read clearly:
 harness(name = "claude_code", kind = "claude_code",
         plugins = ["//tools/plugins:bazel"], skills = ["//tools/skills:review"])
 harness(name = "codex", kind = "codex")
+harness(name = "antigravity", kind = "antigravity")
 harness(name = "pi", kind = "pi")
 
 # //tools/models/SRC
 model(name = "opus", provider = "anthropic", id = "claude-opus-4-8")
 model(name = "gpt55", provider = "openai", id = "gpt-5.5")
-model(name = "nemotron", provider = "nebius", id = "nvidia/nemotron-3-ultra")
+model(name = "gemini_flash", provider = "google", id = "Gemini 3.5 Flash (High)")
+model(name = "nemotron", provider = "nebius", id = "nvidia/Nemotron-3-Ultra-550b-a55b")
 
 # //tools/agent/SRC
 agent(name = "reviewer", harness = "//tools/harness:claude_code", model = "//tools/models:opus")
+agent(name = "triager",  harness = "//tools/harness:antigravity", model = "//tools/models:gemini_flash")
 agent(name = "porter",   harness = "//tools/harness:codex",       model = "//tools/models:gpt55")
 agent(name = "scout",    harness = "//tools/harness:pi",          model = "//tools/models:gpt55")
 ```
 
-- A **harness** is the agent runtime (Claude Code, Codex, Pi, …). It carries
-  runfiles — `plugins` and `skills` — that travel with it.
+- A **harness** is the agent runtime (Claude Code, Codex, Antigravity, Pi, …). It
+  carries runfiles — `plugins` and `skills` — that travel with it.
 - A **model** names the LLM (provider + id).
 - An **agent** pairs a harness with a model. Multiple agents coexist in one repo;
   models swap under a shared harness, harnesses are reused across agents.
 
 Not every harness can drive every model. `claude_code` runs Anthropic models;
-`codex` and `pi` run OpenAI and other open models (e.g. NVIDIA Nemotron served by
-Nebius). An `agent` whose harness cannot drive its model is a validation error.
+`antigravity` runs Google Gemini models; `codex` and `pi` run OpenAI and other
+open models (e.g. NVIDIA Nemotron served by Nebius). An `agent` whose harness
+cannot drive its model is a validation error.
 See `examples/transforms/tools/{harness,models,agent}/SRC` for a worked set.
 
 The agent's identity for caching is `(harness kind, plugins digests, skills
@@ -248,6 +252,53 @@ The materialized patch is the durable artifact; it is what gets committed (with 
 `CapyFun-Agent` trailer) and what an incremental import replays. Thus an import
 is reproducible from the cache even though generation is not.
 
+### Credentials
+
+Generative transforms call provider APIs, so they need credentials — but config
+evaluation is **pure** (no secrets, no I/O). The rule: a secret value never
+appears in an SRC or `.scl` file. A `model` carries at most a credential
+*reference* (a name), and the engine resolves it to a value at execution time,
+injecting it into the harness subprocess's environment.
+
+- **Default (convention).** With no `credential` field, the provider maps to a
+  conventional environment variable, so the common case needs no config — just
+  export the variable:
+
+  | provider | env var |
+  |---|---|
+  | `anthropic` | `ANTHROPIC_API_KEY` |
+  | `openai` | `OPENAI_API_KEY` |
+  | `nebius` | `NEBIUS_API_KEY` |
+
+- **Override.** `model(..., credential = "env:NAME")` names a specific variable
+  (e.g. to select an account). The `env:` prefix is a reference *scheme*;
+  `file:` and secret-manager schemes are natural follow-ons. The value is read
+  only in the engine, never during config evaluation.
+
+- **Ambient-login fallthrough.** The CLI harnesses (`claude_code`, `codex`,
+  `antigravity`) authenticate via their own login (`claude` / `codex login` /
+  `agy`, kept in a keyring or the tool's config dir). If no key resolves, the
+  engine passes the subprocess environment through rather than clobbering it, so
+  the harness uses that login.
+  This is why such an agent runs with zero credential config on a machine where
+  the CLI is already logged in. The HTTP harness (`pi`) has no login and always
+  requires a key.
+
+- **HTTP harness base URL.** `pi` calls an OpenAI-compatible
+  `/chat/completions` endpoint directly. Its base URL defaults per provider
+  (`nebius` → the Nebius Token Factory endpoint, `openai` → `api.openai.com`)
+  and is overridable; the resolved key is sent as a bearer token.
+
+The credential reference is **not** part of the agent cache identity — only
+`(harness kind, plugins/skills digests, model provider+id)` is — so rotating a
+key or switching accounts does not invalidate materialized agent output.
+
+The engine's execution model for an `agent_transform` is therefore: render the
+prompt, resolve the model's credential reference to a value, spawn the harness
+CLI with that value in its environment (plugins/skills as runfiles), capture its
+edits as a patch. Shelling out to `claude -p "<prompt>"` is the minimal proof of
+this path.
+
 ## Validation rules
 
 Hard errors:
@@ -257,6 +308,10 @@ Hard errors:
 - `template()` does not reference a `prompt_template` target, or a referenced var
   label does not resolve; a `prompt_template.src` file is missing;
 - `harness.kind` / `model.provider` outside the known set; empty `model.id`;
+- `model.credential` that is not a recognized reference scheme (`env:<NAME>`
+  with a non-empty name); note this validates the *reference shape* only —
+  whether the variable is actually set is an execution-time concern, not a
+  config error;
 - an `agent` whose harness cannot drive its model (e.g. `claude_code` paired with
   an OpenAI model);
 - `move`/`copy`/`replace`/`apply_patch` paths that escape the subtree, are
@@ -298,6 +353,10 @@ start them before the plain mirror round-trip works.
   files plus neighbors, or a declared include set?
 - How are harness/model versions pinned and surfaced in the cache key (image
   digest, CLI version, API snapshot)?
+- ~~How are provider credentials supplied without putting secrets in pure
+  config?~~ **Resolved:** config carries an `env:`-scheme credential *reference*
+  (default = provider→conventional env var), resolved by the engine at execution
+  time; `claude_code` falls through to ambient CLI login. See *Credentials*.
 - Where is the materialized-patch / agent-output store kept (in-repo under a
   CapyFun dir, or a separate content-addressed store keyed in the commit map)?
 - Do generative transforms need a sandbox/network policy at execution time?
