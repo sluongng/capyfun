@@ -138,14 +138,17 @@ fn resolve_credential_honors_override_var_name() {
 fn harness_command_claude_code_uses_print_flag() {
     let (program, args) = harness_command(HarnessKind::ClaudeCode, None, "hello").unwrap();
     assert_eq!(program, "claude");
-    assert_eq!(args, vec!["-p", "hello"]);
+    assert_eq!(args, vec!["-p", "--permission-mode", "acceptEdits", "hello"]);
 }
 
 #[test]
 fn harness_command_claude_code_includes_model() {
     let (_, args) =
         harness_command(HarnessKind::ClaudeCode, Some("claude-opus-4-8"), "hi").unwrap();
-    assert_eq!(args, vec!["-p", "--model", "claude-opus-4-8", "hi"]);
+    assert_eq!(
+        args,
+        vec!["-p", "--permission-mode", "acceptEdits", "--model", "claude-opus-4-8", "hi"]
+    );
 }
 
 #[test]

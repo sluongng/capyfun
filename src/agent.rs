@@ -180,6 +180,12 @@ pub fn harness_command(
     let program = match harness {
         HarnessKind::ClaudeCode => {
             args.push("-p".to_string());
+            // Auto-accept file edits so an agent_transform can actually modify
+            // files in its working dir non-interactively. Without this, `claude
+            // -p` leaves edits "pending permission" and writes nothing (a silent
+            // no-op). Harmless for text-only `agent-run` prompts.
+            args.push("--permission-mode".to_string());
+            args.push("acceptEdits".to_string());
             if let Some(m) = model_id {
                 args.push("--model".to_string());
                 args.push(m.to_string());
