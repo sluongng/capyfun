@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
 /// CapyFun: import code into and export code out of the TinyTree monorepo.
@@ -111,12 +111,86 @@ fn run_config(args: ConfigArgs) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a GitHub `owner/name` slug to a fetchable URL.
+///
+/// `CAPYFUN_GITHUB_BASE` overrides the GitHub base (used to point imports at
+/// local bare repositories in hermetic tests/demos); otherwise the public
+/// GitHub HTTPS URL is used.
+fn origin_url(slug: &str) -> String {
+    match std::env::var("CAPYFUN_GITHUB_BASE") {
+        Ok(base) => format!("{}/{}", base.trim_end_matches('/'), slug),
+        Err(_) => format!("https://github.com/{slug}.git"),
+    }
+}
+
 fn run_import(args: ImportArgs) -> Result<()> {
-    bail!(
-        "import '{}' (root {}) is not implemented yet (see docs/plans/import-roadmap.md, M4-M7)",
-        args.label,
-        args.root.display()
-    );
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+
+    let import = ir
+        .imports
+        .iter()
+        .find(|i| i.label == args.label)
+        .ok_or_else(|| {
+            let labels: Vec<&str> = ir.imports.iter().map(|i| i.label.as_str()).collect();
+            anyhow::anyhow!(
+                "no github_import labeled `{}` (available: {})",
+                args.label,
+                if labels.is_empty() {
+                    "none".into()
+                } else {
+                    labels.join(", ")
+                }
+            )
+        })?;
+
+    let repo = git2::Repository::open(&args.root)
+        .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
+
+    // Current tip of the monorepo branch we import onto.
+    let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
+    let branch_tip = repo
+        .find_reference(&branch_ref)
+        .ok()
+        .and_then(|r| r.target());
+
+    // Fetch the origin ref into the monorepo's object store.
+    let url = origin_url(&import.repo);
+    let origin_tip = capyfun::engine::fetch_commit(&repo, &url, &import.git_ref)?;
+
+    // Read the patch series from the working tree.
+    let patches = import
+        .patches
+        .iter()
+        .map(|p| {
+            let bytes =
+                std::fs::read(args.root.join(p)).with_context(|| format!("reading patch {p}"))?;
+            Ok(capyfun::engine::PatchFile {
+                label: p.clone(),
+                bytes,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let outcome = capyfun::engine::import(&repo, &import.dest, origin_tip, branch_tip, &patches)?;
+
+    match outcome.head {
+        Some(head) if Some(head) != branch_tip => {
+            repo.reference(
+                &branch_ref,
+                head,
+                true,
+                &format!("capyfun import {}", import.label),
+            )?;
+            println!(
+                "imported {} commit(s) for {} into {}; {} now {}",
+                outcome.imported, import.label, import.dest, branch_ref, head
+            );
+        }
+        _ => println!("{} is already up to date", import.label),
+    }
+    Ok(())
 }
 
 fn run_export(args: ExportArgs) -> Result<()> {

@@ -99,12 +99,48 @@ pub fn parse_origin_trailer(message: &str) -> Option<String> {
     })
 }
 
+/// Top-level entries within an import destination that are CapyFun metadata, not
+/// imported source: they are preserved across import rather than overwritten by
+/// the origin tree. (An upstream repo that itself contains an entry by one of
+/// these names within the destination would be shadowed.)
+const RESERVED_DEST_ENTRIES: [&str; 2] = ["SRC", "patches"];
+
+/// Build the destination subtree for a mirror commit: the origin tree, with any
+/// reserved CapyFun-metadata entries (see [`RESERVED_DEST_ENTRIES`]) carried over
+/// from the existing destination subtree in `base_tree`.
+fn dest_subtree_preserving_metadata(
+    repo: &Repository,
+    base_tree: Oid,
+    dest: &str,
+    origin_tree: Oid,
+) -> Result<Oid> {
+    let base = repo.find_tree(base_tree)?;
+    let existing = base
+        .get_path(Path::new(dest))
+        .ok()
+        .and_then(|e| e.to_object(repo).ok())
+        .and_then(|o| o.into_tree().ok());
+    let Some(existing) = existing else {
+        return Ok(origin_tree);
+    };
+
+    let origin = repo.find_tree(origin_tree)?;
+    let mut builder = repo.treebuilder(Some(&origin))?;
+    for name in RESERVED_DEST_ENTRIES {
+        if let Some(entry) = existing.get_name(name) {
+            builder.insert(name, entry.id(), entry.filemode())?;
+        }
+    }
+    Ok(builder.write()?)
+}
+
 /// Replay a single origin commit as a mirror commit onto `parent`.
 ///
 /// The origin commit's tree is spliced under `dest` into the parent's tree (or
 /// the empty tree when there is no parent), author/committer/message are
-/// preserved, and a [`ORIGIN_TRAILER`] is appended. Returns the new commit OID;
-/// it does not move any ref.
+/// preserved, and a [`ORIGIN_TRAILER`] is appended. Reserved CapyFun metadata in
+/// the destination (`SRC`, `patches`) is carried over. Returns the new commit
+/// OID; it does not move any ref.
 pub fn replay_commit(
     repo: &Repository,
     dest: &str,
@@ -120,7 +156,8 @@ pub fn replay_commit(
         Some(p) => repo.find_commit(p)?.tree()?.id(),
         None => empty_tree(repo)?,
     };
-    let new_tree_oid = splice_tree(repo, base_tree, dest, origin_tree)?;
+    let dest_subtree = dest_subtree_preserving_metadata(repo, base_tree, dest, origin_tree)?;
+    let new_tree_oid = splice_tree(repo, base_tree, dest, dest_subtree)?;
     let new_tree = repo.find_tree(new_tree_oid)?;
 
     let message = with_origin_trailer(origin_commit.message().unwrap_or(""), origin);
@@ -220,6 +257,27 @@ pub fn import_mirror(
         imported: to_import.len(),
         head,
     })
+}
+
+/// Fetch `refname` from `url` into `repo`'s object store and return the commit
+/// it points at. The objects become available locally so they can be replayed.
+pub fn fetch_commit(repo: &Repository, url: &str, refname: &str) -> Result<Oid> {
+    let tmp = "refs/capyfun/fetch_head";
+    let mut remote = repo
+        .remote_anonymous(url)
+        .with_context(|| format!("opening remote {url}"))?;
+    let refspec = format!("+{refname}:{tmp}");
+    remote
+        .fetch(&[&refspec], None, None)
+        .with_context(|| format!("fetching {refname} from {url}"))?;
+    let oid = repo
+        .find_reference(tmp)?
+        .target()
+        .with_context(|| format!("fetched ref {refname} has no target"))?;
+    if let Ok(mut r) = repo.find_reference(tmp) {
+        r.delete().ok();
+    }
+    Ok(oid)
 }
 
 // --- M6: patch layer (tip, rebased on the mirror tip) ---
