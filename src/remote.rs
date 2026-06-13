@@ -8,5 +8,7 @@
 //!
 //! This module is split into focused submodules:
 //! - [`proto`] — generated REAPI + google bindings.
+//! - [`digest`] — SHA256 REAPI digests and the `Directory` Merkle tree.
 
+pub mod digest;
 pub mod proto;
