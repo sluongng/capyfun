@@ -2,9 +2,33 @@
 
 use std::collections::BTreeMap;
 
-use git2::{ObjectType, Oid, Repository, Signature, Time, TreeWalkMode, TreeWalkResult};
+use git2::{
+    DiffFormat, ObjectType, Oid, Repository, Signature, Time, TreeWalkMode, TreeWalkResult,
+};
 
 use super::*;
+
+/// Render a unified-diff patch between two (sub)trees, as `git format-patch`-ish
+/// bytes the engine can re-apply. Used to generate guaranteed-valid fixtures.
+fn make_patch(repo: &Repository, old: Oid, new: Oid) -> Vec<u8> {
+    let old_tree = repo.find_tree(old).unwrap();
+    let new_tree = repo.find_tree(new).unwrap();
+    let diff = repo
+        .diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)
+        .unwrap();
+    let mut buf = Vec::new();
+    diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        // Content lines carry an origin marker that must be re-prepended; file
+        // and hunk headers already include their full text.
+        if matches!(line.origin(), '+' | '-' | ' ') {
+            buf.push(line.origin() as u8);
+        }
+        buf.extend_from_slice(line.content());
+        true
+    })
+    .unwrap();
+    buf
+}
 
 /// Filemode for a regular file blob.
 const FILEMODE_BLOB: i32 = 0o100644;
@@ -383,4 +407,169 @@ fn diverged_history_errors() {
     let other = commit(&repo, write_tree(&repo, &[("a", "z")]), "other\n", &[]);
     let err = import_mirror(&repo, "x", other, Some(head)).unwrap_err();
     assert!(format!("{err:#}").contains("no longer contains"), "{err:#}");
+}
+
+// --- M6: patch layer (tip, rebased on the mirror tip) ---
+
+#[test]
+fn apply_patch_modifies_subtree_under_dest() {
+    let (_d, repo) = temp_repo();
+    let sub_a = write_tree(&repo, &[("go.mod", "module x\n\ngo 1.21\n")]);
+    let sub_b = write_tree(
+        &repo,
+        &[("go.mod", "module x\n\ngo 1.21\ntoolchain go1.21.6\n")],
+    );
+    let patch = make_patch(&repo, sub_a, sub_b);
+
+    let base = splice_tree(
+        &repo,
+        empty_tree(&repo).unwrap(),
+        "third_party/backend",
+        sub_a,
+    )
+    .unwrap();
+    let patched = apply_patch_to_tree(&repo, base, "third_party/backend", &patch).unwrap();
+    let files = read_tree(&repo, patched);
+    assert!(files
+        .get("third_party/backend/go.mod")
+        .unwrap()
+        .contains("toolchain go1.21.6"));
+}
+
+#[test]
+fn patch_layer_stacks_commits_with_trailers() {
+    let (_d, repo) = temp_repo();
+    // Mirror tip: one commit with go.mod under dest.
+    let sub0 = write_tree(&repo, &[("go.mod", "module x\n\ngo 1.21\n")]);
+    let origin = commit(&repo, sub0, "init\n", &[]);
+    let mirror = import_mirror(&repo, "third_party/backend", origin, None)
+        .unwrap()
+        .head
+        .unwrap();
+
+    // Patch 1: add toolchain. Patch 2: add a README.
+    let sub1 = write_tree(
+        &repo,
+        &[("go.mod", "module x\n\ngo 1.21\ntoolchain go1.21.6\n")],
+    );
+    let p1 = make_patch(&repo, sub0, sub1);
+    let sub2 = write_tree(
+        &repo,
+        &[
+            ("go.mod", "module x\n\ngo 1.21\ntoolchain go1.21.6\n"),
+            ("README", "hi\n"),
+        ],
+    );
+    let p2 = make_patch(&repo, sub1, sub2);
+
+    let patches = vec![
+        PatchFile {
+            label: "patches/0001.patch".into(),
+            bytes: p1,
+        },
+        PatchFile {
+            label: "patches/0002.patch".into(),
+            bytes: p2,
+        },
+    ];
+    let tip = apply_patch_layer(&repo, "third_party/backend", mirror, &patches).unwrap();
+
+    // Two patch commits on top of the mirror.
+    let tip_commit = repo.find_commit(tip).unwrap();
+    assert!(has_trailer(tip_commit.message().unwrap(), PATCH_TRAILER));
+    assert_eq!(tip_commit.parent_id(0).unwrap(), {
+        // parent is the first patch commit, whose parent is the mirror tip
+        let p = repo.find_commit(tip_commit.parent_id(0).unwrap()).unwrap();
+        assert_eq!(p.parent_id(0).unwrap(), mirror);
+        p.id()
+    });
+
+    let files = read_tree(&repo, tip_commit.tree().unwrap().id());
+    assert!(files
+        .get("third_party/backend/go.mod")
+        .unwrap()
+        .contains("toolchain"));
+    assert_eq!(files.get("third_party/backend/README").unwrap(), "hi\n");
+}
+
+#[test]
+fn failing_patch_aborts_without_moving_state() {
+    let (_d, repo) = temp_repo();
+    let sub0 = write_tree(&repo, &[("go.mod", "module x\n\ngo 1.21\n")]);
+    let origin = commit(&repo, sub0, "init\n", &[]);
+    let mirror = import_mirror(&repo, "dst", origin, None)
+        .unwrap()
+        .head
+        .unwrap();
+
+    // A patch that targets content not present -> won't apply.
+    let bogus = b"diff --git a/go.mod b/go.mod\n--- a/go.mod\n+++ b/go.mod\n@@ -1,1 +1,1 @@\n-nonexistent line\n+replacement\n".to_vec();
+    let patches = vec![PatchFile {
+        label: "bad.patch".into(),
+        bytes: bogus,
+    }];
+    let err = apply_patch_layer(&repo, "dst", mirror, &patches).unwrap_err();
+    assert!(format!("{err:#}").contains("bad.patch"), "{err:#}");
+    // Mirror tip is untouched (no ref was moved by the engine).
+    assert!(repo.find_commit(mirror).is_ok());
+}
+
+#[test]
+fn import_with_patches_is_idempotent_and_rebases() {
+    let (_d, repo) = temp_repo();
+    // A file large enough that the patch's region and a later upstream change in
+    // a different region do not overlap (so the patch rebases cleanly).
+    let v1 = "module acme/widget\n\ngo 1.21\n\n// pad a\n// pad b\n// pad c\n// pad d\n\nrequire cobra v1.8.0\n";
+    let v1_patched = "module acme/widget\n\ngo 1.21\ntoolchain go1.21.6\n\n// pad a\n// pad b\n// pad c\n// pad d\n\nrequire cobra v1.8.0\n";
+    let sub_v1 = write_tree(&repo, &[("go.mod", v1)]);
+    let c1 = commit(&repo, sub_v1, "c1\n", &[]);
+
+    // A patch adding a toolchain line near the top of v1.
+    let sub_v1_patched = write_tree(&repo, &[("go.mod", v1_patched)]);
+    let patch = PatchFile {
+        label: "patches/0001.patch".into(),
+        bytes: make_patch(&repo, sub_v1, sub_v1_patched),
+    };
+
+    let first = import(&repo, "dst", c1, None, std::slice::from_ref(&patch)).unwrap();
+    assert_eq!(first.imported, 1);
+    let tip1 = first.head.unwrap();
+
+    // Re-run, same upstream + same patch: nothing new, identical tip OID.
+    let again = import(&repo, "dst", c1, Some(tip1), std::slice::from_ref(&patch)).unwrap();
+    assert_eq!(again.imported, 0);
+    assert_eq!(
+        again.head,
+        Some(tip1),
+        "deterministic patch layer => stable tip"
+    );
+
+    // New upstream commit changing a *different* region (the require line);
+    // the patch must rebase onto the new mirror tip.
+    let v2 = "module acme/widget\n\ngo 1.21\n\n// pad a\n// pad b\n// pad c\n// pad d\n\nrequire cobra v1.9.0\n";
+    let sub_v2 = write_tree(&repo, &[("go.mod", v2)]);
+    let c2 = commit(&repo, sub_v2, "bump cobra\n", &[c1]);
+    let third = import(&repo, "dst", c2, Some(tip1), std::slice::from_ref(&patch)).unwrap();
+    assert_eq!(third.imported, 1, "only c2 is new");
+    let tip2 = third.head.unwrap();
+
+    // Tip reflects c2 content plus the rebased patch.
+    let files = read_tree(&repo, repo.find_commit(tip2).unwrap().tree().unwrap().id());
+    let go_mod = files.get("dst/go.mod").unwrap();
+    assert!(
+        go_mod.contains("require cobra v1.9.0"),
+        "new upstream content: {go_mod}"
+    );
+    assert!(
+        go_mod.contains("toolchain go1.21.6"),
+        "patch rebased on top: {go_mod}"
+    );
+
+    // Top commit is a patch commit; the mirror underneath has two origin commits.
+    let tip_commit = repo.find_commit(tip2).unwrap();
+    assert!(has_trailer(tip_commit.message().unwrap(), PATCH_TRAILER));
+    assert_eq!(
+        mirror_origins(&repo, tip2),
+        vec![c2.to_string(), c1.to_string()]
+    );
 }

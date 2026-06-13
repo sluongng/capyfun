@@ -4,8 +4,10 @@
 //! commit replay logic for import. This is the only module that performs Git
 //! I/O.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
-use git2::{Commit, Oid, Repository, Tree};
+use git2::{Commit, Diff, Oid, Repository, Signature, Time, Tree};
 
 /// Git filemode for a tree (subdirectory) entry.
 const FILEMODE_TREE: i32 = 0o040000;
@@ -14,6 +16,20 @@ const FILEMODE_TREE: i32 = 0o040000;
 /// This trailer is the durable commit map: greppable, clone-surviving, and the
 /// basis for incremental import.
 pub const ORIGIN_TRAILER: &str = "CapyFun-Origin";
+
+/// Commit-message trailer marking a CapyFun-authored patch-layer commit.
+pub const PATCH_TRAILER: &str = "CapyFun-Patch";
+
+/// Fixed authorship for CapyFun-authored (patch-layer) commits, so the patch
+/// layer is reproducible: re-applying the same patches onto the same mirror tip
+/// yields identical commit OIDs.
+fn capyfun_signature() -> Result<Signature<'static>> {
+    Ok(Signature::new(
+        "CapyFun",
+        "capyfun@tinytree.dev",
+        &Time::new(0, 0),
+    )?)
+}
 
 /// The empty tree object in `repo` (creating it if absent).
 pub fn empty_tree(repo: &Repository) -> Result<Oid> {
@@ -166,11 +182,10 @@ fn first_parent_delta(repo: &Repository, tip: Oid, stop: Option<Oid>) -> Result<
         chain.push(c);
         cur = repo.find_commit(c)?.parent_ids().next();
     }
-    if stop.is_some() {
+    if let Some(stop) = stop {
         anyhow::bail!(
-            "origin tip {tip} no longer contains the last imported commit {} on its \
-             first-parent chain (was history rewritten / force-pushed?)",
-            stop.expect("checked")
+            "origin tip {tip} no longer contains the last imported commit {stop} on its \
+             first-parent chain (was history rewritten / force-pushed?)"
         );
     }
     chain.reverse();
@@ -203,6 +218,140 @@ pub fn import_mirror(
     }
     Ok(ImportOutcome {
         imported: to_import.len(),
+        head,
+    })
+}
+
+// --- M6: patch layer (tip, rebased on the mirror tip) ---
+
+/// A patch to apply in the tip layer: a label (its repo-relative path, recorded
+/// in the trailer) and the unified-diff bytes.
+#[derive(Debug, Clone)]
+pub struct PatchFile {
+    pub label: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Slice a patch buffer to its first `diff --git` (or `--- `) header, dropping
+/// any commit-message preamble (Subject/description/`---`) that `git format-patch`
+/// emits, which libgit2's diff parser does not expect.
+fn strip_patch_preamble(patch: &[u8]) -> &[u8] {
+    if let Some(pos) = find_subslice(patch, b"diff --git ") {
+        return &patch[pos..];
+    }
+    if let Some(pos) = find_subslice(patch, b"--- ") {
+        return &patch[pos..];
+    }
+    patch
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .filter(|_| !needle.is_empty())
+}
+
+/// Apply one unified-diff patch within `dest` of `base_tree`, returning the new
+/// tree OID. The patch's paths are relative to the imported subtree, so it is
+/// applied to the subtree at `dest` and the result is spliced back.
+pub fn apply_patch_to_tree(
+    repo: &Repository,
+    base_tree: Oid,
+    dest: &str,
+    patch: &[u8],
+) -> Result<Oid> {
+    let base = repo.find_tree(base_tree)?;
+    let sub_entry = base
+        .get_path(Path::new(dest))
+        .with_context(|| format!("destination `{dest}` not found in tree"))?;
+    let sub_tree = sub_entry
+        .to_object(repo)?
+        .into_tree()
+        .map_err(|_| anyhow::anyhow!("destination `{dest}` is not a directory"))?;
+
+    let diff = Diff::from_buffer(strip_patch_preamble(patch))
+        .context("parsing patch as a unified diff")?;
+    let mut index = repo
+        .apply_to_tree(&sub_tree, &diff, None)
+        .context("patch did not apply cleanly")?;
+    let patched_sub = index.write_tree_to(repo)?;
+    splice_tree(repo, base_tree, dest, patched_sub)
+}
+
+/// Apply an ordered patch series as `CapyFun-Patch` commits on top of
+/// `mirror_tip`. Returns the new tip. A patch that fails to apply aborts with a
+/// clear error; since no ref is moved here, nothing is half-written.
+pub fn apply_patch_layer(
+    repo: &Repository,
+    dest: &str,
+    mirror_tip: Oid,
+    patches: &[PatchFile],
+) -> Result<Oid> {
+    let sig = capyfun_signature()?;
+    let mut head = mirror_tip;
+    for patch in patches {
+        let parent = repo.find_commit(head)?;
+        let new_tree_oid = apply_patch_to_tree(repo, parent.tree()?.id(), dest, &patch.bytes)
+            .with_context(|| format!("applying patch {}", patch.label))?;
+        let new_tree = repo.find_tree(new_tree_oid)?;
+        let message = format!(
+            "Apply patch {}\n\n{PATCH_TRAILER}: {}\n",
+            patch.label, patch.label
+        );
+        head = repo.commit(None, &sig, &sig, &message, &new_tree, &[&parent])?;
+    }
+    Ok(head)
+}
+
+/// Strip any patch-layer commits from the top of `tip`, returning the underlying
+/// mirror tip (the first commit without a `CapyFun-Patch` trailer).
+fn strip_patch_layer(repo: &Repository, tip: Option<Oid>) -> Result<Option<Oid>> {
+    let mut cur = tip;
+    while let Some(c) = cur {
+        let commit = repo.find_commit(c)?;
+        let is_patch = commit
+            .message()
+            .map(|m| has_trailer(m, PATCH_TRAILER))
+            .unwrap_or(false);
+        if is_patch {
+            cur = commit.parent_ids().next();
+        } else {
+            break;
+        }
+    }
+    Ok(cur)
+}
+
+fn has_trailer(message: &str, key: &str) -> bool {
+    let prefix = format!("{key}: ");
+    message.lines().any(|l| l.trim().starts_with(&prefix))
+}
+
+/// Full import: mirror the origin's first-parent history, then (re)apply the
+/// patch layer on top. Idempotent — re-running with no new upstream commits and
+/// the same patches reproduces the same tip OID (the patch layer is dropped and
+/// deterministically re-applied).
+pub fn import(
+    repo: &Repository,
+    dest: &str,
+    origin_tip: Oid,
+    branch_tip: Option<Oid>,
+    patches: &[PatchFile],
+) -> Result<ImportOutcome> {
+    let mirror_base = strip_patch_layer(repo, branch_tip)?;
+    let mirror = import_mirror(repo, dest, origin_tip, mirror_base)?;
+
+    let head = match (mirror.head, patches.is_empty()) {
+        (_, true) => mirror.head,
+        (Some(mirror_tip), false) => Some(apply_patch_layer(repo, dest, mirror_tip, patches)?),
+        (None, false) => {
+            anyhow::bail!("cannot apply patches: the import produced no commits")
+        }
+    };
+
+    Ok(ImportOutcome {
+        imported: mirror.imported,
         head,
     })
 }
