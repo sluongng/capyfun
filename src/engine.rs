@@ -17,8 +17,22 @@ const FILEMODE_TREE: i32 = 0o040000;
 /// basis for incremental import.
 pub const ORIGIN_TRAILER: &str = "CapyFun-Origin";
 
+/// Commit-message trailer scoping a CapyFun commit to its import destination, so
+/// several imports can share one branch without conflating their commit maps.
+pub const IMPORT_TRAILER: &str = "CapyFun-Import";
+
 /// Commit-message trailer marking a CapyFun-authored patch-layer commit.
 pub const PATCH_TRAILER: &str = "CapyFun-Patch";
+
+/// The value of the last (bottom-most reading, i.e. most recent) `key:` trailer.
+fn trailer_value(message: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    message.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(|s| s.trim().to_owned())
+    })
+}
 
 /// Fixed authorship for CapyFun-authored (patch-layer) commits, so the patch
 /// layer is reproducible: re-applying the same patches onto the same mirror tip
@@ -79,24 +93,20 @@ fn splice_into(
     Ok(builder.write()?)
 }
 
-/// Append a `CapyFun-Origin: <sha>` trailer to a commit message.
-fn with_origin_trailer(message: &str, origin: Oid) -> String {
+/// Append `CapyFun-Origin` and `CapyFun-Import` trailers to a mirror message.
+fn with_mirror_trailers(message: &str, origin: Oid, dest: &str) -> String {
     let body = message.trim_end();
+    let trailers = format!("{ORIGIN_TRAILER}: {origin}\n{IMPORT_TRAILER}: {dest}\n");
     if body.is_empty() {
-        format!("{ORIGIN_TRAILER}: {origin}\n")
+        trailers
     } else {
-        format!("{body}\n\n{ORIGIN_TRAILER}: {origin}\n")
+        format!("{body}\n\n{trailers}")
     }
 }
 
 /// Extract the origin SHA from a mirror commit's `CapyFun-Origin` trailer.
 pub fn parse_origin_trailer(message: &str) -> Option<String> {
-    let prefix = format!("{ORIGIN_TRAILER}: ");
-    message.lines().rev().find_map(|line| {
-        line.trim()
-            .strip_prefix(&prefix)
-            .map(|s| s.trim().to_owned())
-    })
+    trailer_value(message, ORIGIN_TRAILER)
 }
 
 /// Top-level entries within an import destination that are CapyFun metadata, not
@@ -160,7 +170,7 @@ pub fn replay_commit(
     let new_tree_oid = splice_tree(repo, base_tree, dest, dest_subtree)?;
     let new_tree = repo.find_tree(new_tree_oid)?;
 
-    let message = with_origin_trailer(origin_commit.message().unwrap_or(""), origin);
+    let message = with_mirror_trailers(origin_commit.message().unwrap_or(""), origin, dest);
 
     let parent_commit: Option<Commit> = match parent {
         Some(p) => Some(repo.find_commit(p)?),
@@ -188,17 +198,22 @@ pub struct ImportOutcome {
     pub head: Option<Oid>,
 }
 
-/// The last origin commit reflected in the monorepo, found by scanning the
-/// first-parent chain of `base` for the most recent `CapyFun-Origin` trailer.
-/// Returns `None` when nothing has been imported yet.
-fn last_imported_origin(repo: &Repository, base: Option<Oid>) -> Result<Option<Oid>> {
+/// The last origin commit reflected for `dest`, found by scanning the
+/// first-parent chain of `base` for the most recent mirror commit whose
+/// `CapyFun-Import` trailer matches `dest`. Scoping by `dest` lets several
+/// imports share one branch without conflating their commit maps. Returns `None`
+/// when this import has nothing yet.
+fn last_imported_origin(repo: &Repository, base: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
     let mut cur = base;
     while let Some(c) = cur {
         let commit = repo.find_commit(c)?;
-        if let Some(sha) = parse_origin_trailer(commit.message().unwrap_or("")) {
-            let oid = Oid::from_str(&sha)
-                .with_context(|| format!("commit {c} has malformed {ORIGIN_TRAILER}: {sha}"))?;
-            return Ok(Some(oid));
+        let message = commit.message().unwrap_or("");
+        if trailer_value(message, IMPORT_TRAILER).as_deref() == Some(dest) {
+            if let Some(sha) = parse_origin_trailer(message) {
+                let oid = Oid::from_str(&sha)
+                    .with_context(|| format!("commit {c} has malformed {ORIGIN_TRAILER}: {sha}"))?;
+                return Ok(Some(oid));
+            }
         }
         cur = commit.parent_ids().next();
     }
@@ -241,7 +256,7 @@ pub fn import_mirror(
     origin_tip: Oid,
     base: Option<Oid>,
 ) -> Result<ImportOutcome> {
-    let last = last_imported_origin(repo, base)?;
+    let last = last_imported_origin(repo, base, dest)?;
     if Some(origin_tip) == last {
         return Ok(ImportOutcome {
             imported: 0,
@@ -354,7 +369,7 @@ pub fn apply_patch_layer(
             .with_context(|| format!("applying patch {}", patch.label))?;
         let new_tree = repo.find_tree(new_tree_oid)?;
         let message = format!(
-            "Apply patch {}\n\n{PATCH_TRAILER}: {}\n",
+            "Apply patch {}\n\n{PATCH_TRAILER}: {}\n{IMPORT_TRAILER}: {dest}\n",
             patch.label, patch.label
         );
         head = repo.commit(None, &sig, &sig, &message, &new_tree, &[&parent])?;
@@ -362,17 +377,19 @@ pub fn apply_patch_layer(
     Ok(head)
 }
 
-/// Strip any patch-layer commits from the top of `tip`, returning the underlying
-/// mirror tip (the first commit without a `CapyFun-Patch` trailer).
-fn strip_patch_layer(repo: &Repository, tip: Option<Oid>) -> Result<Option<Oid>> {
+/// Strip this import's patch-layer commits from the top of `tip`, returning the
+/// underlying mirror tip. Only commits that are this `dest`'s patch commits are
+/// removed, so an import whose commits sit at the branch tip can rebase its own
+/// patch layer. (If a *different* import's commits sit on top, this stops at
+/// them; re-importing a buried import is out of scope — use per-import refs.)
+fn strip_patch_layer(repo: &Repository, tip: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
     let mut cur = tip;
     while let Some(c) = cur {
         let commit = repo.find_commit(c)?;
-        let is_patch = commit
-            .message()
-            .map(|m| has_trailer(m, PATCH_TRAILER))
-            .unwrap_or(false);
-        if is_patch {
+        let message = commit.message().unwrap_or("");
+        let is_our_patch = has_trailer(message, PATCH_TRAILER)
+            && trailer_value(message, IMPORT_TRAILER).as_deref() == Some(dest);
+        if is_our_patch {
             cur = commit.parent_ids().next();
         } else {
             break;
@@ -397,7 +414,7 @@ pub fn import(
     branch_tip: Option<Oid>,
     patches: &[PatchFile],
 ) -> Result<ImportOutcome> {
-    let mirror_base = strip_patch_layer(repo, branch_tip)?;
+    let mirror_base = strip_patch_layer(repo, branch_tip, dest)?;
     let mirror = import_mirror(repo, dest, origin_tip, mirror_base)?;
 
     let head = match (mirror.head, patches.is_empty()) {

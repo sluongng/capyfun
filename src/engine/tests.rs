@@ -281,13 +281,18 @@ fn replay_is_deterministic() {
 #[test]
 fn origin_trailer_round_trips() {
     let oid = "0123456789abcdef0123456789abcdef01234567";
-    let msg = with_origin_trailer(
+    let msg = with_mirror_trailers(
         "subject line\n\nbody paragraph\n",
         Oid::from_str(oid).unwrap(),
+        "third_party/x",
     );
     assert!(msg.contains("subject line"));
     assert!(msg.contains("body paragraph"));
     assert_eq!(parse_origin_trailer(&msg).as_deref(), Some(oid));
+    assert_eq!(
+        trailer_value(&msg, IMPORT_TRAILER).as_deref(),
+        Some("third_party/x")
+    );
     // No trailer present.
     assert_eq!(parse_origin_trailer("just a message"), None);
 }
@@ -407,6 +412,35 @@ fn diverged_history_errors() {
     let other = commit(&repo, write_tree(&repo, &[("a", "z")]), "other\n", &[]);
     let err = import_mirror(&repo, "x", other, Some(head)).unwrap_err();
     assert!(format!("{err:#}").contains("no longer contains"), "{err:#}");
+}
+
+#[test]
+fn two_imports_share_a_branch_without_conflating_maps() {
+    let (_d, repo) = temp_repo();
+    // Origin A (two commits) and unrelated origin B (one commit).
+    let a1 = commit(&repo, write_tree(&repo, &[("a", "1")]), "a1\n", &[]);
+    let a2 = commit(&repo, write_tree(&repo, &[("a", "2")]), "a2\n", &[a1]);
+    let b1 = commit(&repo, write_tree(&repo, &[("b", "1")]), "b1\n", &[]);
+
+    let head_a = import_mirror(&repo, "third_party/a", a2, None)
+        .unwrap()
+        .head
+        .unwrap();
+    // Importing B onto the same branch must NOT treat A's trailers as B's map.
+    let rb = import_mirror(&repo, "third_party/b", b1, Some(head_a)).unwrap();
+    assert_eq!(rb.imported, 1, "B's history is independent of A's");
+    let head_b = rb.head.unwrap();
+
+    let files = read_tree(
+        &repo,
+        repo.find_commit(head_b).unwrap().tree().unwrap().id(),
+    );
+    assert_eq!(files.get("third_party/a/a").unwrap(), "2");
+    assert_eq!(files.get("third_party/b/b").unwrap(), "1");
+
+    // Re-importing A is still idempotent even though B sits on top of it.
+    let again = import_mirror(&repo, "third_party/a", a2, Some(head_b)).unwrap();
+    assert_eq!(again.imported, 0);
 }
 
 // --- M6: patch layer (tip, rebased on the mirror tip) ---
