@@ -1,0 +1,2 @@
+# //tools/harness — the agent runtime.
+harness(name = "claude_code", kind = "claude_code")

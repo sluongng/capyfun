@@ -1,0 +1,6 @@
+# //tools/agent — pairs a harness with a model.
+agent(
+    name = "reviewer",
+    harness = "//tools/harness:claude_code",
+    model = "//tools/models:opus",
+)

@@ -37,8 +37,24 @@ enum Command {
     Reconcile(ReconcileArgs),
     /// Run the automation server: poll GH Archive and host the webhook endpoint.
     Serve(ServeArgs),
+    /// Run an `on_issue` reaction from a saved GitHub `issues` webhook payload.
+    React(ReactArgs),
     /// Run a coding-agent harness over a prompt (proof of the agent_transform path).
     AgentRun(AgentRunArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ReactArgs {
+    /// Path to a GitHub `issues` webhook payload (JSON).
+    #[arg(long)]
+    issue: PathBuf,
+    /// Monorepo root (the directory holding the root `SRC` file).
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Resolve and match only: print the agent, branch, and rendered prompt that
+    /// would run, without cloning the repo, running the agent, or opening a PR.
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -211,8 +227,75 @@ fn main() -> Result<()> {
         Command::Status(args) => run_status(args),
         Command::Reconcile(args) => run_reconcile(args),
         Command::Serve(args) => run_serve(args),
+        Command::React(args) => run_react(args),
         Command::AgentRun(args) => run_agent_run(args),
     }
+}
+
+fn run_react(args: ReactArgs) -> Result<()> {
+    use capyfun::forge::{Forge, GitHubAppForge, LocalForge};
+    use capyfun::react::{self, ReactionIndex};
+
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+
+    let bytes = std::fs::read(&args.issue)
+        .with_context(|| format!("reading issue payload {}", args.issue.display()))?;
+    let payload: serde_json::Value =
+        serde_json::from_slice(&bytes).context("parsing issue payload as JSON")?;
+    let ev = react::parse_webhook_issue(&payload)
+        .context("payload is not a recognizable GitHub `issues` webhook")?;
+
+    let index = ReactionIndex::from_ir(&ir);
+    let matched = react::match_issue(&index, &ev);
+    if matched.is_empty() {
+        println!(
+            "no reaction matches {} issue #{} (action={}, labels={:?})",
+            ev.repo, ev.number, ev.action, ev.labels
+        );
+        return Ok(());
+    }
+
+    if args.dry_run {
+        for r in &matched {
+            let (inv, prompt) =
+                react::resolve_reaction_invocation(&ir, r, &ev, &args.root)?;
+            println!("reaction {} would run:", r.label);
+            println!("  repo:   {}", r.repo);
+            println!("  branch: capyfun/issue-{} (base {})", ev.number, ev.default_branch);
+            println!("  agent:  {} ({})", inv.agent_id, inv.model_id);
+            println!("  prompt:");
+            for line in prompt.lines() {
+                println!("    {line}");
+            }
+        }
+        return Ok(());
+    }
+
+    // Live: authenticate as a GitHub App when configured, else use local bare
+    // repos (CAPYFUN_GITHUB_BASE) for a hermetic demo.
+    let forge: Box<dyn Forge> = if std::env::var("CAPYFUN_GITHUB_APP_ID").is_ok() {
+        Box::new(GitHubAppForge::from_env()?)
+    } else {
+        Box::new(LocalForge::new())
+    };
+    let runner = capyfun::engine::LiveRunner;
+
+    let mut failed = 0usize;
+    for r in &matched {
+        match react::run_reaction(forge.as_ref(), &runner, &ir, r, &ev, &args.root) {
+            Ok(outcome) => println!("{}", outcome.summary),
+            Err(e) => {
+                failed += 1;
+                eprintln!("reaction {}: error: {e:#}", r.label);
+            }
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} reaction(s) failed", matched.len());
+    }
+    Ok(())
 }
 
 fn run_agent_run(args: AgentRunArgs) -> Result<()> {
@@ -678,6 +761,17 @@ fn run_config(args: ConfigArgs) -> Result<()> {
                 println!(
                     "{}:{}  prompt_template src={}",
                     p.package, p.name, p.src
+                );
+            }
+            capyfun::config::Decl::OnIssue(r) => {
+                println!(
+                    "{}:{}  on_issue repo={} action={} label={} agent={}",
+                    r.package,
+                    r.name,
+                    r.repo,
+                    r.action.as_deref().unwrap_or("<any>"),
+                    r.label.as_deref().unwrap_or("<any>"),
+                    r.agent,
                 );
             }
         }

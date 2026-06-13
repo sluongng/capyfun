@@ -53,6 +53,8 @@ pub enum Decl {
     Agent(AgentDecl),
     #[serde(rename = "prompt_template")]
     PromptTemplate(PromptTemplateDecl),
+    #[serde(rename = "on_issue")]
+    OnIssue(OnIssueDecl),
 }
 
 impl Decl {
@@ -67,6 +69,7 @@ impl Decl {
             Decl::Model(_) => "model",
             Decl::Agent(_) => "agent",
             Decl::PromptTemplate(_) => "prompt_template",
+            Decl::OnIssue(_) => "on_issue",
         }
     }
 
@@ -81,6 +84,7 @@ impl Decl {
             Decl::Model(d) => &d.package,
             Decl::Agent(d) => &d.package,
             Decl::PromptTemplate(d) => &d.package,
+            Decl::OnIssue(d) => &d.package,
         }
     }
 }
@@ -243,7 +247,7 @@ impl PromptValue {
             .map(|p| p.spec.clone())
             .with_context(|| {
                 format!(
-                    "agent_transform `prompt` is `{}`, not a template; use template(...)",
+                    "`prompt` is `{}`, not a template; use template(...)",
                     value.get_type()
                 )
             })
@@ -360,6 +364,28 @@ pub struct PromptTemplateDecl {
     pub name: String,
     /// `.tmpl` file path relative to the declaring SRC package.
     pub src: String,
+    pub package: String,
+}
+
+/// An issue-triggered reaction (`on_issue`): when a matching `issues` webhook
+/// fires on `repo`, run `agent` with `prompt` over a checkout of the repo and
+/// open a PR. This is a *reaction* rule — the generative counterpart to
+/// import/export, declared in an SRC file like any other rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OnIssueDecl {
+    pub name: String,
+    /// GitHub `owner/name` slug the App is installed on (the issue's repo and the
+    /// PR destination).
+    pub repo: String,
+    /// Optional issue action filter (e.g. `opened` / `labeled`); `None` matches
+    /// the default action set (opened + labeled).
+    pub action: Option<String>,
+    /// Optional issue-label filter; `None` matches any label.
+    pub label: Option<String>,
+    /// Label of the `agent` rule to run.
+    pub agent: String,
+    /// The bound prompt (`template(...)`) the agent runs with.
+    pub prompt: PromptSpec,
     pub package: String,
 }
 
@@ -682,6 +708,34 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
         s.record(Decl::PromptTemplate(PromptTemplateDecl {
             name,
             src,
+            package,
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// React to GitHub `issues` events on `repo`: when the (optional) `action`
+    /// and `label` filters match, run `agent` with `prompt` over a checkout of
+    /// the repo and open a PR. `prompt` is a `template(...)` value, like
+    /// `agent_transform`.
+    fn on_issue<'v>(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] repo: String,
+        #[starlark(require = named)] agent: String,
+        #[starlark(require = named)] prompt: Value<'v>,
+        #[starlark(require = named)] action: Option<String>,
+        #[starlark(require = named)] label: Option<String>,
+        eval: &mut Evaluator,
+    ) -> anyhow::Result<NoneType> {
+        let prompt = PromptValue::unpack(prompt)?;
+        let s = state(eval)?;
+        let package = s.package.clone();
+        s.record(Decl::OnIssue(OnIssueDecl {
+            name,
+            repo,
+            action,
+            label,
+            agent,
+            prompt,
             package,
         }))?;
         Ok(NoneType)

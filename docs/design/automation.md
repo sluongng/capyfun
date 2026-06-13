@@ -23,7 +23,10 @@ first slice (the poll reconciler) is spec'd concretely at the end.
 > reconciles do not write the default branch directly; **pin-bump PRs**
 > ([`pin-bump.md`](pin-bump.md)) — proposing a new upstream pin on a release, vs.
 > reconciling to the declared pin; and webhook **HMAC verification** + event
-> hygiene ([`webhook-security.md`](webhook-security.md)).
+> hygiene ([`webhook-security.md`](webhook-security.md), W1 now done). Beyond
+> reconciling code, the server also runs **reactions** — generative responses to
+> forge events (issue → agent → PR), authenticating as a GitHub App
+> ([`reactions.md`](reactions.md)).
 
 ## Thesis: level-triggered, events are hints
 

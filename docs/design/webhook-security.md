@@ -8,10 +8,14 @@ Read `../../CLAUDE.md` first, and `automation.md` for the server and its Safety
 requirements (this doc makes the "verify webhook HMAC signatures; dedupe events"
 line concrete).
 
-> **Status:** design only — not implemented. Today `POST /webhook` parses and
-> acts on any payload it receives (the `// TODO: verify the X-Hub-Signature-256
-> HMAC` in `handle_request`). This doc is the plan to authenticate and de-noise
-> that endpoint. No code yet.
+> **Status:** **W1 (HMAC) and basic W2 (delivery-id dedup) are implemented**
+> (`src/server.rs`, alongside the reactions work — see
+> [`reactions.md`](reactions.md)). `POST /webhook` now fails closed without
+> `CAPYFUN_WEBHOOK_SECRET`, verifies `X-Hub-Signature-256` over the raw body with
+> a constant-time `hmac`+`sha2` compare (401 on failure), routes by
+> `X-GitHub-Event`, and dedupes redeliveries by `X-GitHub-Delivery` via a bounded
+> FIFO. Remaining: cross-ingress dedup by `(repo, ref, sha)` and the W3
+> per-target debounce window.
 
 ## Why it matters
 

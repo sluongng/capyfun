@@ -22,6 +22,9 @@ pub struct Ir {
     pub models: Vec<Model>,
     pub agents: Vec<Agent>,
     pub prompt_templates: Vec<PromptTemplate>,
+    /// Issue-triggered reactions (`on_issue`): the event→agent→PR edges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,6 +84,36 @@ pub struct Export {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transforms: Vec<Transform>,
 }
+
+/// An issue-triggered reaction (`on_issue`): when a matching `issues` webhook
+/// fires on `repo`, run `agent` (with `prompt_template` + `vars`) over a checkout
+/// of the repo and open a PR. The generative counterpart to import/export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reaction {
+    /// Bazel-style label, e.g. `//automation:prototype`.
+    pub label: String,
+    pub name: String,
+    pub package: String,
+    /// GitHub `owner/name` slug (the issue's repo and PR destination).
+    pub repo: String,
+    /// Issue action filter (e.g. `labeled`); `None` matches the default set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Issue-label filter; `None` matches any label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_filter: Option<String>,
+    /// Resolved label of the `agent` rule this reaction runs.
+    pub agent: String,
+    /// Resolved label of the `prompt_template` rule the agent runs with.
+    pub prompt_template: String,
+    /// Ordered (key, value) prompt vars bound at the call site.
+    pub vars: Vec<(String, String)>,
+}
+
+/// Issue actions a reaction may filter on (a closed set, validated at compile).
+/// `None` in a rule matches the default subset (opened + labeled).
+pub const KNOWN_ISSUE_ACTIONS: &[&str] =
+    &["opened", "edited", "reopened", "labeled", "assigned"];
 
 /// An agent harness runtime (`harness`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -201,6 +234,7 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
     let mut harnesses = Vec::new();
     let mut models = Vec::new();
     let mut prompt_templates = Vec::new();
+    let mut reactions: Vec<Reaction> = Vec::new();
     // Agents are lowered in a second pass: resolving `harness`/`model` labels
     // needs the harnesses/models above to be lowered first.
     let mut agent_decls = Vec::new();
@@ -366,6 +400,41 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                 });
             }
             Decl::Agent(d) => agent_decls.push(d),
+            Decl::OnIssue(d) => {
+                let label = format!("{}:{}", d.package, d.name);
+                validate::check_slug(&label, &d.repo, &mut errors);
+                if let Some(action) = &d.action {
+                    if !KNOWN_ISSUE_ACTIONS.contains(&action.as_str()) {
+                        errors.push(format!(
+                            "{label}: on_issue action `{action}` is unknown (known: {})",
+                            KNOWN_ISSUE_ACTIONS.join(", ")
+                        ));
+                    }
+                }
+                // Var values that look like `//`-labels are shape-checked only
+                // (purity: no filesystem/target lookup here), mirroring
+                // agent_transform.
+                for (k, v) in &d.prompt.vars {
+                    if v.starts_with("//") && !is_label_shaped(v) {
+                        errors.push(format!(
+                            "{label}: on_issue prompt var `{k}` value `{v}` is not a valid label"
+                        ));
+                    }
+                }
+                reactions.push(Reaction {
+                    label,
+                    name: d.name.clone(),
+                    package: d.package.clone(),
+                    repo: d.repo.clone(),
+                    action: d.action.clone(),
+                    label_filter: d.label.clone(),
+                    // agent / prompt_template labels are resolved in the third
+                    // pass below, once agents and prompt templates are lowered.
+                    agent: d.agent.clone(),
+                    prompt_template: d.prompt.template.clone(),
+                    vars: d.prompt.vars.clone(),
+                });
+            }
         }
     }
 
@@ -455,6 +524,25 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
         }
     }
 
+    // `on_issue` reactions also carry `agent` / `prompt_template` labels resolved
+    // against the same agent/prompt-template tables.
+    for r in &reactions {
+        resolve_label(
+            &r.label,
+            "agent",
+            &r.agent,
+            agents.iter().map(|a| a.label.as_str()),
+            &mut errors,
+        );
+        resolve_label(
+            &r.label,
+            "prompt_template",
+            &r.prompt_template,
+            prompt_templates.iter().map(|p| p.label.as_str()),
+            &mut errors,
+        );
+    }
+
     // --- cross-rule checks ---
     // Names are unique per package across all rule kinds; destinations (imports
     // and vendors both write into the tree) must not overlap.
@@ -491,6 +579,11 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
                 .iter()
                 .map(|p| (p.package.as_str(), p.name.as_str(), p.label.as_str())),
         )
+        .chain(
+            reactions
+                .iter()
+                .map(|r| (r.package.as_str(), r.name.as_str(), r.label.as_str())),
+        )
         .collect();
     check_unique_names(&names, &mut errors);
 
@@ -516,6 +609,7 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
         models,
         agents,
         prompt_templates,
+        reactions,
     })
 }
 

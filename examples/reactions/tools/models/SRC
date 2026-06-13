@@ -1,0 +1,2 @@
+# //tools/models — the LLM the agent drives.
+model(name = "opus", provider = "anthropic", id = "claude-opus-4-8")

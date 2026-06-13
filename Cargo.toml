@@ -21,6 +21,8 @@ blake3 = "1.8.2"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1.1.9"
 git2 = "0.21.0"
+hmac = "0.12"
+jsonwebtoken = "9"
 prost = "0.14"
 prost-types = "0.14"
 regex = "1.12.4"

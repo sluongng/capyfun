@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::{
     AgentDecl, ExportDecl, GitRepoDecl, HarnessDecl, ImportDecl, ModelDecl, MonorepoDecl,
-    PromptTemplateDecl, TransformSpec,
+    OnIssueDecl, PromptSpec, PromptTemplateDecl, TransformSpec,
 };
 use crate::transform::{Phase, Transform};
 
@@ -536,6 +536,114 @@ fn rewrite_message_requires_before_and_after_together() {
     let errs = compile_decls(vec![mono("//"), Decl::Import(imp)]).unwrap_err();
     assert!(
         errs.iter().any(|e| e.contains("before` and `after")),
+        "{errs:?}"
+    );
+}
+
+/// A minimal harness+model+agent+prompt_template stack so an `on_issue`'s
+/// `agent`/`prompt_template` labels resolve.
+fn agent_stack() -> Vec<Decl> {
+    vec![
+        harness("//tools/harness", "cc", "claude_code"),
+        Decl::Model(model("//tools/models", "opus", "anthropic")),
+        agent(
+            "//tools/agent",
+            "reviewer",
+            "//tools/harness:cc",
+            "//tools/models:opus",
+        ),
+        Decl::PromptTemplate(PromptTemplateDecl {
+            name: "proto".into(),
+            src: "proto.tmpl".into(),
+            package: "//tools/agent/prompts".into(),
+        }),
+    ]
+}
+
+fn on_issue(action: Option<&str>, label: Option<&str>, agent_label: &str) -> Decl {
+    Decl::OnIssue(OnIssueDecl {
+        name: "prototype".into(),
+        repo: "acme/backend".into(),
+        action: action.map(str::to_owned),
+        label: label.map(str::to_owned),
+        agent: agent_label.into(),
+        prompt: PromptSpec {
+            template: "//tools/agent/prompts:proto".into(),
+            vars: vec![],
+        },
+        package: "//automation".into(),
+    })
+}
+
+#[test]
+fn lowers_on_issue_reaction_and_resolves_labels() {
+    let mut decls = vec![mono("//")];
+    decls.extend(agent_stack());
+    decls.push(on_issue(
+        Some("labeled"),
+        Some("assign-agent"),
+        "//tools/agent:reviewer",
+    ));
+    let ir = compile_decls(decls).unwrap();
+
+    assert_eq!(ir.reactions.len(), 1);
+    let r = &ir.reactions[0];
+    assert_eq!(r.label, "//automation:prototype");
+    assert_eq!(r.repo, "acme/backend");
+    assert_eq!(r.action.as_deref(), Some("labeled"));
+    assert_eq!(r.label_filter.as_deref(), Some("assign-agent"));
+    assert_eq!(r.agent, "//tools/agent:reviewer");
+    assert_eq!(r.prompt_template, "//tools/agent/prompts:proto");
+}
+
+#[test]
+fn on_issue_unknown_action_errors() {
+    let mut decls = vec![mono("//")];
+    decls.extend(agent_stack());
+    decls.push(on_issue(
+        Some("frobnicated"),
+        None,
+        "//tools/agent:reviewer",
+    ));
+    let errs = compile_decls(decls).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("action `frobnicated` is unknown")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn on_issue_unresolved_agent_errors() {
+    let mut decls = vec![mono("//")];
+    decls.extend(agent_stack());
+    decls.push(on_issue(None, None, "//tools/agent:ghost"));
+    let errs = compile_decls(decls).unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("agent label `//tools/agent:ghost` does not resolve")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn on_issue_bad_repo_slug_errors() {
+    let mut decls = vec![mono("//")];
+    decls.extend(agent_stack());
+    decls.push(Decl::OnIssue(OnIssueDecl {
+        name: "prototype".into(),
+        repo: "not-a-slug".into(),
+        action: None,
+        label: None,
+        agent: "//tools/agent:reviewer".into(),
+        prompt: PromptSpec {
+            template: "//tools/agent/prompts:proto".into(),
+            vars: vec![],
+        },
+        package: "//automation".into(),
+    }));
+    let errs = compile_decls(decls).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("not a valid \"owner/name\" slug")),
         "{errs:?}"
     );
 }

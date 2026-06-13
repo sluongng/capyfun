@@ -1,0 +1,12 @@
+# //automation — issue-triggered reactions.
+#
+# When an issue on acme/backend is labeled `assign-agent`, run the `reviewer`
+# agent over a checkout of the repo and open a PR prototyping the issue.
+on_issue(
+    name = "prototype-assigned",
+    repo = "acme/backend",
+    action = "labeled",
+    label = "assign-agent",
+    agent = "//tools/agent:reviewer",
+    prompt = template("//tools/agent/prompts:prototype-issue"),
+)

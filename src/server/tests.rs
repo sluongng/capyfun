@@ -30,6 +30,7 @@ fn test_ir() -> Ir {
         models: vec![],
         agents: vec![],
         prompt_templates: vec![],
+        reactions: vec![],
     }
 }
 
@@ -159,4 +160,78 @@ fn archive_url_format_and_utc_parts() {
     );
     // epoch
     assert_eq!(utc_parts(0), (1970, 1, 1, 0));
+}
+
+// --- webhook auth + routing -------------------------------------------------
+
+const SECRET: &str = "shh";
+
+fn ctx_with_secret() -> HttpCtx {
+    HttpCtx::new(Index::from_ir(&test_ir()), std::sync::Arc::new(ReportOnly))
+        .with_secret(Some(SECRET.to_owned()))
+}
+
+#[test]
+fn signature_round_trips_and_constant_time_verifies() {
+    let body = br#"{"hello":"world"}"#;
+    let sig = webhook_signature(SECRET, body);
+    assert!(sig.starts_with("sha256="));
+    assert!(verify_signature(SECRET, body, Some(&sig)));
+    // Wrong secret, tampered body, and missing/garbage signatures all fail.
+    assert!(!verify_signature("other", body, Some(&sig)));
+    assert!(!verify_signature(SECRET, b"tampered", Some(&sig)));
+    assert!(!verify_signature(SECRET, body, None));
+    assert!(!verify_signature(SECRET, body, Some("sha1=deadbeef")));
+}
+
+#[test]
+fn webhook_fails_closed_without_a_secret() {
+    let ctx = HttpCtx::new(Index::from_ir(&test_ir()), std::sync::Arc::new(ReportOnly));
+    let body = br#"{"ref":"refs/heads/master","after":"x","repository":{"full_name":"google/uuid"}}"#;
+    let (code, _) = handle_webhook(&ctx, body, None, "push", None);
+    assert_eq!(code, 401);
+}
+
+#[test]
+fn webhook_rejects_bad_signature() {
+    let ctx = ctx_with_secret();
+    let body = br#"{"ref":"refs/heads/master","after":"x","repository":{"full_name":"google/uuid"}}"#;
+    let (code, _) = handle_webhook(&ctx, body, Some("sha256=00"), "push", None);
+    assert_eq!(code, 401);
+}
+
+#[test]
+fn webhook_accepts_signed_push_and_dedupes_redelivery() {
+    let ctx = ctx_with_secret();
+    let body = br#"{"ref":"refs/heads/master","after":"x","repository":{"full_name":"google/uuid"}}"#;
+    let sig = webhook_signature(SECRET, body);
+
+    let (code, b) = handle_webhook(&ctx, body, Some(&sig), "push", Some("delivery-1"));
+    assert_eq!(code, 202, "{b}");
+    assert!(b.contains("1 trigger"), "{b}");
+
+    // Same delivery id -> deduped.
+    let (code, b) = handle_webhook(&ctx, body, Some(&sig), "push", Some("delivery-1"));
+    assert_eq!(code, 200);
+    assert!(b.contains("duplicate"), "{b}");
+}
+
+#[test]
+fn webhook_routes_issues_without_reactions_configured() {
+    let ctx = ctx_with_secret();
+    let body = br#"{"action":"opened","issue":{"number":1,"title":"t","body":"b","labels":[]},"repository":{"full_name":"google/uuid","default_branch":"main"}}"#;
+    let sig = webhook_signature(SECRET, body);
+    let (code, b) = handle_webhook(&ctx, body, Some(&sig), "issues", None);
+    assert_eq!(code, 202);
+    assert!(b.contains("reactions not configured"), "{b}");
+}
+
+#[test]
+fn webhook_answers_ping() {
+    let ctx = ctx_with_secret();
+    let body = br#"{"zen":"keep it logically awesome"}"#;
+    let sig = webhook_signature(SECRET, body);
+    let (code, b) = handle_webhook(&ctx, body, Some(&sig), "ping", None);
+    assert_eq!(code, 200);
+    assert!(b.contains("pong"), "{b}");
 }

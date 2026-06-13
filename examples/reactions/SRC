@@ -1,0 +1,2 @@
+# //SRC — workspace anchor for the reactions example.
+monorepo(name = "acme", default_branch = "main")

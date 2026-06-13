@@ -12,7 +12,7 @@
 //! idempotent, so this server can be lossy and at-least-once. See
 //! `docs/design/automation.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,9 +20,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use git2::Repository;
+use hmac::{Hmac, Mac};
 use serde::Serialize;
+use sha2::Sha256;
 
+use crate::engine::{AgentRunner, LiveRunner};
+use crate::forge::{Forge, GitHubAppForge, LocalForge};
 use crate::ir::Ir;
+use crate::react::{self, IssueEvent, ReactionIndex};
 use crate::reconcile;
 
 /// A GitHub activity event, normalized across GH Archive and webhook shapes.
@@ -303,71 +308,359 @@ fn poll_once(index: &Index, actor: &dyn Actor) -> Result<()> {
     Ok(())
 }
 
-/// Handle one HTTP request: `/healthz`, or `POST /webhook` (the future App path).
-fn handle_request(mut req: tiny_http::Request, index: &Index, actor: &dyn Actor) {
+/// Runs matched issue reactions for the webhook handler: resolves the affected
+/// [`Reaction`](crate::ir::Reaction)s and runs each through [`react::run_reaction`]
+/// against a [`Forge`] + [`AgentRunner`]. Behind its own type so the HTTP layer
+/// stays testable and so a deployment can omit reactions entirely (no App
+/// configured). Git/agent work is serialized by `lock` — reactions clone+push
+/// external repos and run a coding agent, so one at a time keeps it cheap and
+/// avoids interleaving heavy runs.
+pub struct ReactionService {
+    ir: Ir,
+    root: PathBuf,
+    forge: Box<dyn Forge>,
+    runner: Box<dyn AgentRunner + Send + Sync>,
+    lock: Mutex<()>,
+}
+
+impl ReactionService {
+    pub fn new(
+        ir: Ir,
+        root: PathBuf,
+        forge: Box<dyn Forge>,
+        runner: Box<dyn AgentRunner + Send + Sync>,
+    ) -> Self {
+        Self {
+            ir,
+            root,
+            forge,
+            runner,
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// Run every reaction matching `ev`, returning a one-line status.
+    fn handle(&self, ev: &IssueEvent) -> String {
+        let index = ReactionIndex::from_ir(&self.ir);
+        let matched = react::match_issue(&index, ev);
+        if matched.is_empty() {
+            return format!("no reaction for {} issue #{}", ev.repo, ev.number);
+        }
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut summaries = Vec::new();
+        for r in matched {
+            match react::run_reaction(
+                self.forge.as_ref(),
+                self.runner.as_ref(),
+                &self.ir,
+                r,
+                ev,
+                &self.root,
+            ) {
+                Ok(outcome) => {
+                    println!("{}", outcome.summary);
+                    summaries.push(outcome.summary);
+                }
+                Err(e) => {
+                    eprintln!("reaction {}: error: {e:#}", r.label);
+                    summaries.push(format!("reaction {} error: {e}", r.label));
+                }
+            }
+        }
+        summaries.join("; ")
+    }
+}
+
+/// A bounded FIFO set of recently-seen delivery keys, so a redelivered webhook
+/// does not re-run the (idempotent but expensive) reconcile/reaction pipeline.
+struct Dedup {
+    seen: HashSet<String>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl Dedup {
+    fn new(cap: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    /// Record `key`; returns `true` if it was newly inserted (not a duplicate).
+    fn insert_new(&mut self, key: &str) -> bool {
+        if self.seen.contains(key) {
+            return false;
+        }
+        if self.order.len() >= self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+        self.order.push_back(key.to_owned());
+        self.seen.insert(key.to_owned());
+        true
+    }
+}
+
+/// Everything the HTTP webhook/health endpoint needs: the push reverse index +
+/// reconcile [`Actor`], the optional issue [`ReactionService`], the webhook HMAC
+/// secret, and the delivery-dedup cache.
+pub struct HttpCtx {
+    index: Index,
+    actor: Arc<dyn Actor>,
+    reactions: Option<ReactionService>,
+    /// The webhook HMAC secret. `None` makes the endpoint **fail closed** — it
+    /// rejects every webhook POST — so an unsigned endpoint is never live.
+    secret: Option<String>,
+    seen: Mutex<Dedup>,
+}
+
+impl HttpCtx {
+    /// A context with no reactions and no secret (fail-closed webhook). Tests
+    /// layer a secret/reactions on with the `with_*` setters.
+    pub fn new(index: Index, actor: Arc<dyn Actor>) -> Self {
+        Self {
+            index,
+            actor,
+            reactions: None,
+            secret: None,
+            seen: Mutex::new(Dedup::new(1024)),
+        }
+    }
+
+    pub fn with_secret(mut self, secret: Option<String>) -> Self {
+        self.secret = secret;
+        self
+    }
+
+    pub fn with_reactions(mut self, reactions: Option<ReactionService>) -> Self {
+        self.reactions = reactions;
+        self
+    }
+}
+
+/// Compute the `sha256=<hex>` GitHub webhook signature for `body` under `secret`.
+/// Exposed so a sender/relay (and the tests) can produce the header the endpoint
+/// verifies.
+pub fn webhook_signature(secret: &str, body: &[u8]) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(body);
+    format!("sha256={}", hex_encode(&mac.finalize().into_bytes()))
+}
+
+/// Verify a GitHub `X-Hub-Signature-256` header against `body` under `secret`,
+/// using a constant-time compare. Rejects a missing or non-`sha256=` signature.
+fn verify_signature(secret: &str, body: &[u8], header: Option<&str>) -> bool {
+    let Some(hex) = header.and_then(|h| h.strip_prefix("sha256=")) else {
+        return false;
+    };
+    let Some(expected) = hex_decode(hex) else {
+        return false;
+    };
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(body);
+    mac.verify_slice(&expected).is_ok()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Read a request header by (case-insensitive) name.
+fn header_value(req: &tiny_http::Request, name: &'static str) -> Option<String> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.equiv(name))
+        .map(|h| h.value.as_str().to_owned())
+}
+
+/// Handle one HTTP request: `GET /healthz`, or `POST /webhook` (push reconciles
+/// and issue reactions). Webhook POSTs are HMAC-verified and deduped first.
+fn handle_request(mut req: tiny_http::Request, ctx: &HttpCtx) {
     use tiny_http::Method;
+
+    // Only `/webhook` needs the body/headers; read them up front for that route.
     let (code, body) = match (req.method(), req.url()) {
         (Method::Get, "/healthz") => (200, "ok\n".to_owned()),
         (Method::Post, "/webhook") => {
-            // TODO: verify the X-Hub-Signature-256 HMAC before trusting payloads.
-            let mut buf = String::new();
-            let _ = req.as_reader().read_to_string(&mut buf);
-            match serde_json::from_str::<serde_json::Value>(&buf)
-                .ok()
-                .and_then(|v| parse_webhook_push(&v))
-            {
-                Some(ev) => {
-                    let triggers = match_event(index, &ev);
-                    eprintln!(
-                        "webhook: {} {} -> {} trigger(s)",
-                        ev.repo,
-                        ev.git_ref.as_deref().unwrap_or(""),
-                        triggers.len()
-                    );
-                    let status = actor.act(&triggers);
-                    (202, format!("{status}\n"))
-                }
-                None => (400, "could not parse webhook payload\n".to_owned()),
-            }
+            let mut raw = Vec::new();
+            let _ = req.as_reader().read_to_end(&mut raw);
+            let sig = header_value(&req, "X-Hub-Signature-256");
+            let event = header_value(&req, "X-GitHub-Event").unwrap_or_default();
+            let delivery = header_value(&req, "X-GitHub-Delivery");
+            handle_webhook(ctx, &raw, sig.as_deref(), &event, delivery.as_deref())
         }
         _ => (404, "not found\n".to_owned()),
     };
     let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(code));
 }
 
-/// Serve the HTTP endpoint loop (blocking) over `server`, acting via `actor`.
-pub fn run_http(server: tiny_http::Server, index: Arc<Index>, actor: Arc<dyn Actor>) {
-    for req in server.incoming_requests() {
-        handle_request(req, &index, actor.as_ref());
+/// The `POST /webhook` logic, factored out for unit testing without a socket:
+/// HMAC-verify → dedupe → route by `X-GitHub-Event`. Returns `(status, body)`.
+fn handle_webhook(
+    ctx: &HttpCtx,
+    raw: &[u8],
+    signature: Option<&str>,
+    event: &str,
+    delivery: Option<&str>,
+) -> (u16, String) {
+    // Authenticate first: fail closed when no secret is configured.
+    let Some(secret) = ctx.secret.as_deref() else {
+        return (401, "webhook secret not configured; endpoint disabled\n".to_owned());
+    };
+    if !verify_signature(secret, raw, signature) {
+        return (401, "invalid or missing signature\n".to_owned());
+    }
+
+    // Dedupe exact redeliveries by GitHub's delivery id.
+    if let Some(id) = delivery {
+        let mut seen = ctx.seen.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.insert_new(id) {
+            return (200, "duplicate delivery; skipped\n".to_owned());
+        }
+    }
+
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return (400, "could not parse webhook payload\n".to_owned());
+    };
+
+    match event {
+        "ping" => (200, "pong\n".to_owned()),
+        "issues" => match react::parse_webhook_issue(&v) {
+            Some(ev) => match &ctx.reactions {
+                Some(service) => {
+                    eprintln!(
+                        "webhook: issues {} #{} {} -> reacting",
+                        ev.repo, ev.number, ev.action
+                    );
+                    (202, format!("{}\n", service.handle(&ev)))
+                }
+                None => (202, "reactions not configured; ignored\n".to_owned()),
+            },
+            None => (400, "could not parse issues payload\n".to_owned()),
+        },
+        // `push` (and any other event) routes to the reconcile path.
+        _ => match parse_webhook_push(&v) {
+            Some(ev) => {
+                let triggers = match_event(&ctx.index, &ev);
+                eprintln!(
+                    "webhook: {} {} -> {} trigger(s)",
+                    ev.repo,
+                    ev.git_ref.as_deref().unwrap_or(""),
+                    triggers.len()
+                );
+                let status = ctx.actor.act(&triggers);
+                (202, format!("{status}\n"))
+            }
+            None => (400, "could not parse webhook payload\n".to_owned()),
+        },
     }
 }
 
+/// Serve the HTTP endpoint loop (blocking) over `server`, using `ctx`.
+pub fn run_http(server: tiny_http::Server, ctx: Arc<HttpCtx>) {
+    for req in server.incoming_requests() {
+        handle_request(req, &ctx);
+    }
+}
+
+/// Build the issue [`ReactionService`] from the environment, or `None` when there
+/// are no reactions or no way to act. Live deployments authenticate as a GitHub
+/// App (`CAPYFUN_GITHUB_APP_ID`/`_KEY`); hermetic demos use local bare repos
+/// (`CAPYFUN_GITHUB_BASE`).
+fn build_reaction_service(ir: &Ir, root: &Path) -> Option<ReactionService> {
+    if ir.reactions.is_empty() {
+        return None;
+    }
+    let forge: Box<dyn Forge> = if std::env::var("CAPYFUN_GITHUB_APP_ID").is_ok() {
+        match GitHubAppForge::from_env() {
+            Ok(f) => Box::new(f),
+            Err(e) => {
+                eprintln!("capyfun serve: reactions disabled: {e:#}");
+                return None;
+            }
+        }
+    } else if std::env::var("CAPYFUN_GITHUB_BASE").is_ok() {
+        Box::new(LocalForge::new())
+    } else {
+        eprintln!(
+            "capyfun serve: {} reaction(s) declared but no GitHub App configured \
+             (set CAPYFUN_GITHUB_APP_ID + CAPYFUN_GITHUB_APP_KEY); reactions disabled",
+            ir.reactions.len()
+        );
+        return None;
+    };
+    Some(ReactionService::new(
+        ir.clone(),
+        root.to_path_buf(),
+        forge,
+        Box::new(LiveRunner),
+    ))
+}
+
 /// Run the automation server: an HTTP endpoint plus a GH Archive poll loop.
-/// Matched events drive an idempotent reconcile of the affected target(s).
-/// With `once`, run a single poll cycle and return (no HTTP server).
+/// Matched push events drive an idempotent reconcile; matched issue events drive
+/// a reaction. With `once`, run a single poll cycle and return (no HTTP server).
 pub fn serve(ir: &Ir, root: &Path, addr: &str, interval: Duration, once: bool) -> Result<()> {
-    let index = Arc::new(Index::from_ir(ir));
+    let index = Index::from_ir(ir);
     let actor: Arc<dyn Actor> = Arc::new(ReconcileActor::new(ir.clone(), root.to_path_buf()));
     eprintln!(
-        "capyfun serve: {} subscribed repo(s), {} import(s), {} vendor(s)",
+        "capyfun serve: {} subscribed repo(s), {} import(s), {} vendor(s), {} reaction(s)",
         index.repos(),
         ir.imports.len(),
-        ir.vendors.len()
+        ir.vendors.len(),
+        ir.reactions.len(),
     );
 
     if once {
         return poll_once(&index, actor.as_ref());
     }
 
+    let secret = std::env::var("CAPYFUN_WEBHOOK_SECRET").ok();
+    if secret.is_none() {
+        eprintln!(
+            "capyfun serve: CAPYFUN_WEBHOOK_SECRET is not set; the webhook endpoint will \
+             reject all POSTs (fail closed). /healthz and polling are unaffected."
+        );
+    }
+    let reactions = build_reaction_service(ir, root);
+
     let server =
         tiny_http::Server::http(addr).map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?;
     eprintln!("capyfun serve: listening on http://{addr} (POST /webhook, GET /healthz)");
-    let http_index = Arc::clone(&index);
-    let http_actor = Arc::clone(&actor);
-    std::thread::spawn(move || run_http(server, http_index, http_actor));
+
+    // The poll loop reuses the same reconcile actor (one lock) as the webhook
+    // path, so the two never race on the monorepo's refs.
+    let poll_index = Index::from_ir(ir);
+    let poll_actor = Arc::clone(&actor);
+
+    let ctx = Arc::new(
+        HttpCtx::new(index, actor)
+            .with_secret(secret)
+            .with_reactions(reactions),
+    );
+    std::thread::spawn(move || run_http(server, ctx));
 
     loop {
-        if let Err(e) = poll_once(&index, actor.as_ref()) {
+        if let Err(e) = poll_once(&poll_index, poll_actor.as_ref()) {
             eprintln!("poll error: {e:#}");
         }
         std::thread::sleep(interval);

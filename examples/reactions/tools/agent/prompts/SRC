@@ -1,0 +1,2 @@
+# //tools/agent/prompts — versioned, reviewable prompt templates.
+prompt_template(name = "prototype-issue", src = "prototype-issue.tmpl")

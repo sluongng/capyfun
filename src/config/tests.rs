@@ -349,3 +349,66 @@ fn non_transform_in_transforms_list_errors() {
     let msg = format!("{err:#}");
     assert!(msg.contains("not a transform"), "unexpected error: {msg}");
 }
+
+#[test]
+fn captures_on_issue_reaction() {
+    let (_dir, root) = write_tree(&[(
+        "automation/SRC",
+        "on_issue(\n\
+         \x20   name = \"prototype\",\n\
+         \x20   repo = \"acme/backend\",\n\
+         \x20   action = \"labeled\",\n\
+         \x20   label = \"assign-agent\",\n\
+         \x20   agent = \"//tools/agent:reviewer\",\n\
+         \x20   prompt = template(\"//tools/agent/prompts:proto\", vars = {\"k\": \"v\"}),\n\
+         )\n",
+    )]);
+    let cfg = evaluate(&root).unwrap();
+    let reactions: Vec<_> = cfg
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::OnIssue(r) => Some(r),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reactions.len(), 1);
+    let r = reactions[0];
+    assert_eq!(r.name, "prototype");
+    assert_eq!(r.repo, "acme/backend");
+    assert_eq!(r.action.as_deref(), Some("labeled"));
+    assert_eq!(r.label.as_deref(), Some("assign-agent"));
+    assert_eq!(r.agent, "//tools/agent:reviewer");
+    assert_eq!(r.prompt.template, "//tools/agent/prompts:proto");
+    assert_eq!(r.prompt.vars, vec![("k".to_owned(), "v".to_owned())]);
+    assert_eq!(r.package, "//automation");
+}
+
+#[test]
+fn on_issue_in_library_errors() {
+    let (_dir, root) = write_tree(&[
+        ("SRC", "load(\"//lib/bad.scl\", \"x\")\nx()\n"),
+        (
+            "lib/bad.scl",
+            "on_issue(name = \"o\", repo = \"a/b\", agent = \"//a:b\", \
+             prompt = template(\"//a:p\"))\ndef x():\n    pass\n",
+        ),
+    ]);
+    let err = evaluate(&root).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cannot be instantiated in a .scl library"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn on_issue_non_template_prompt_errors() {
+    let (_dir, root) = write_tree(&[(
+        "SRC",
+        "on_issue(name = \"o\", repo = \"a/b\", agent = \"//a:b\", prompt = \"oops\")\n",
+    )]);
+    let err = evaluate(&root).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("not a template"), "unexpected error: {msg}");
+}

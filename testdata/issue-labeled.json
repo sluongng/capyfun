@@ -1,0 +1,16 @@
+{
+  "action": "labeled",
+  "label": { "name": "assign-agent" },
+  "issue": {
+    "number": 7,
+    "title": "Add a /version endpoint",
+    "body": "The backend should expose its build version at GET /version so deploys can be verified. Return the version string as JSON: {\"version\": \"...\"}.",
+    "html_url": "https://github.com/acme/backend/issues/7",
+    "labels": [{ "name": "enhancement" }, { "name": "assign-agent" }]
+  },
+  "repository": {
+    "full_name": "acme/backend",
+    "default_branch": "main"
+  },
+  "installation": { "id": 42 }
+}
