@@ -255,6 +255,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
+ "serde_json",
  "starlark",
  "tempfile",
 ]

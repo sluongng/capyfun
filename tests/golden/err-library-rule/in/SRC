@@ -1,0 +1,2 @@
+load("//lib/bad.star", "f")
+f()

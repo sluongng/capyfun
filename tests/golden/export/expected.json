@@ -1,0 +1,18 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "github_export",
+      "name": "go-sdk",
+      "from_path": "client",
+      "repo": "acme/sdk-go",
+      "branch": "main",
+      "package": "//sdk/go"
+    }
+  ]
+}

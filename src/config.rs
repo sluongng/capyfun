@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use starlark::any::ProvidesStaticType;
 use starlark::environment::{FrozenModule, Globals, GlobalsBuilder, Module};
 use starlark::eval::{Evaluator, FileLoader};
@@ -30,10 +31,14 @@ use starlark::values::none::NoneType;
 use starlark::values::FrozenHeapName;
 
 /// A single captured rule instantiation, attributed to its declaring package.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind")]
 pub enum Decl {
+    #[serde(rename = "monorepo")]
     Monorepo(MonorepoDecl),
+    #[serde(rename = "github_import")]
     Import(ImportDecl),
+    #[serde(rename = "github_export")]
     Export(ExportDecl),
 }
 
@@ -57,19 +62,20 @@ impl Decl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MonorepoDecl {
     pub name: String,
     pub default_branch: String,
     pub package: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImportDecl {
     pub name: String,
     /// GitHub `owner/name` slug.
     pub repo: String,
     /// Tracked upstream ref, e.g. `refs/heads/main`.
+    #[serde(rename = "ref")]
     pub git_ref: String,
     /// Optional subpath within the declaring package; `None` means the package
     /// directory itself.
@@ -79,7 +85,7 @@ pub struct ImportDecl {
     pub package: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExportDecl {
     pub name: String,
     /// Subpath within the declaring package to export; `None` means the package.
@@ -92,7 +98,7 @@ pub struct ExportDecl {
 }
 
 /// The captured result of evaluating every SRC file under a monorepo root.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct RawConfig {
     pub decls: Vec<Decl>,
 }

@@ -1,0 +1,7 @@
+evaluating SRC `//`: error: load path `lib/x.star` must be `//`-anchored from the monorepo root
+ --> //:1:1
+  |
+1 | load("lib/x.star", "y")
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  |
+

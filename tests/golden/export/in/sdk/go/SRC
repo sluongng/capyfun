@@ -1,0 +1,1 @@
+github_export(name = "go-sdk", repo = "acme/sdk-go", branch = "main", from_path = "client")

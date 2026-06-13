@@ -1,0 +1,10 @@
+evaluating SRC `//`: Traceback (most recent call last):
+  * //:1, in <module>
+      github_import(name = "a")
+error: Missing named-only parameter `repo` for call to `github_import`
+ --> //:1:1
+  |
+1 | github_import(name = "a")
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+

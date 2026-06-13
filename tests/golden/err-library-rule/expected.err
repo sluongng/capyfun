@@ -1,0 +1,16 @@
+evaluating SRC `//`: error: evaluating library `//lib/bad.star`
+ --> //:1:1
+  |
+1 | load("//lib/bad.star", "f")
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+: Traceback (most recent call last):
+  * //lib/bad.star:1, in <module>
+      github_import(name = "oops", repo = "o/r")
+error: rule `github_import` cannot be instantiated in a .star library; instantiate rules in SRC files (libraries define macros only)
+ --> //lib/bad.star:1:1
+  |
+1 | github_import(name = "oops", repo = "o/r")
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+

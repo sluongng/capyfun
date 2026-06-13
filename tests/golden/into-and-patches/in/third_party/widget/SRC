@@ -1,0 +1,10 @@
+github_import(
+    name = "widget",
+    repo = "acme/widget",
+    ref = "refs/heads/release",
+    into = "vendor",
+    patches = [
+        "patches/0001-a.patch",
+        "patches/0002-b.patch",
+    ],
+)

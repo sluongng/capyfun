@@ -1,0 +1,19 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "github_import",
+      "name": "api",
+      "repo": "acme/api",
+      "ref": "refs/heads/main",
+      "into": null,
+      "patches": [],
+      "package": "//services/api"
+    }
+  ]
+}
