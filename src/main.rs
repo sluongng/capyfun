@@ -15,10 +15,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Discover and evaluate SRC files, listing the captured rules.
+    Config(ConfigArgs),
     /// Replay an external repository's commits into a monorepo path.
     Import(ImportArgs),
     /// Publish a monorepo path to a destination remote as a GitHub PR.
     Export(ExportArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct ConfigArgs {
+    /// Monorepo root (the directory holding the root `SRC` file).
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
@@ -42,9 +51,48 @@ struct ExportArgs {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Config(args) => run_config(args),
         Command::Import(args) => run_import(args),
         Command::Export(args) => run_export(args),
     }
+}
+
+fn run_config(args: ConfigArgs) -> Result<()> {
+    let cfg = capyfun::config::evaluate(&args.root)?;
+    if cfg.decls.is_empty() {
+        println!("no rules found under {}", args.root.display());
+        return Ok(());
+    }
+    for decl in &cfg.decls {
+        match decl {
+            capyfun::config::Decl::Monorepo(m) => {
+                println!(
+                    "{}  monorepo {}  default_branch={}",
+                    m.package, m.name, m.default_branch
+                );
+            }
+            capyfun::config::Decl::Import(i) => {
+                let into = i.into.as_deref().unwrap_or("<package>");
+                println!(
+                    "{}:{}  github_import repo={} ref={} into={} patches={}",
+                    i.package,
+                    i.name,
+                    i.repo,
+                    i.git_ref,
+                    into,
+                    i.patches.len()
+                );
+            }
+            capyfun::config::Decl::Export(e) => {
+                let from = e.from_path.as_deref().unwrap_or("<package>");
+                println!(
+                    "{}:{}  github_export repo={} branch={} from={}",
+                    e.package, e.name, e.repo, e.branch, from
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_import(args: ImportArgs) -> Result<()> {
