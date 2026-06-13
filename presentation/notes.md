@@ -44,6 +44,7 @@ If you run long, cut from slides 1 and 6 — never from slide 3.
 
 ## Slide 6 — What's next · 0:10
 **Say:** "Next: ship export to close the loop, scale onto Bazel's remote execution — dedup is free because output's content-addressed — and react to production signals, not just commits."
+**Side-note callout (point at the box):** "And a side effect of config-as-code plus reproducible transforms: replay your own history through different agents and models to benchmark cost, speed, and quality — and because it's all normal Git history, you can bisect to find which change broke something."
 **Close line:** "Import runs end-to-end today; export is the next edge, and it reuses all the same machinery."
 
 ---
