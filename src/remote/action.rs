@@ -21,9 +21,11 @@ use super::proto::reapi;
 pub struct ActionSpec {
     /// The harness invocation, e.g. `["claude", "-p", "<prompt>"]`.
     pub arguments: Vec<String>,
-    /// Paths the action must produce, relative to the working directory. For an
-    /// `agent_transform` this is the single materialized patch (e.g. `out.patch`).
+    /// Paths the action must produce, relative to the working directory.
     pub output_paths: Vec<String>,
+    /// Working directory for the command, relative to the input root (empty =
+    /// the input root itself).
+    pub working_directory: String,
     /// Non-secret environment variables. The credential must NOT appear here.
     pub env: Vec<(String, String)>,
     /// Executor selection / capability properties (e.g. `container-image`,
@@ -84,6 +86,7 @@ pub fn build_action(spec: &ActionSpec) -> BuiltAction {
         arguments: spec.arguments.clone(),
         environment_variables,
         output_paths,
+        working_directory: spec.working_directory.clone(),
         ..Default::default()
     };
     let (command_digest, command_bytes) = message_digest(&command);

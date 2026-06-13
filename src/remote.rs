@@ -11,8 +11,10 @@
 //! - [`digest`] — SHA256 REAPI digests and the `Directory` Merkle tree.
 //! - [`action`] — build a `Command` + `Action` and its cache-key digest.
 //! - [`client`] — a blocking REAPI gRPC client (CAS / ActionCache / Execute).
+//! - [`executor`] — run a transform as an Action, AC-cached, output materialized.
 
 pub mod action;
 pub mod client;
 pub mod digest;
+pub mod executor;
 pub mod proto;

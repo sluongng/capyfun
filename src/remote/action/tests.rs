@@ -9,6 +9,7 @@ fn spec() -> ActionSpec {
     ActionSpec {
         arguments: vec!["claude".into(), "-p".into(), "modernize".into()],
         output_paths: vec!["out.patch".into()],
+        working_directory: String::new(),
         env: vec![("CAPYFUN_MODEL".into(), "claude-opus-4-8".into())],
         platform: vec![
             ("OSFamily".into(), "Linux".into()),
