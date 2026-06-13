@@ -1,0 +1,31 @@
+# Agent tool dependencies for the monorepo.
+#
+# Agents are composable: a `harness` (the runtime + its plugins/skills runfiles)
+# and a `model` (the LLM) are paired into an `agent`. Multiple agents can coexist;
+# models swap under a shared harness, and harnesses are reused across agents.
+#
+# Package: //tools/agents
+
+harness(
+    name = "cc",
+    kind = "claude_code",                  # claude_code | codex | pi | ...
+    plugins = ["//tools/plugins:bazel"],   # runfiles (plugin targets, T4+)
+    skills = ["//tools/skills:review"],    # runfiles (skill targets, T4+)
+)
+
+model(
+    name = "opus48",
+    provider = "anthropic",
+    id = "claude-opus-4-8",
+)
+
+model(
+    name = "gpt55",
+    provider = "openai",
+    id = "gpt-5.5",
+)
+
+# Pair a harness with a model. Referenced by agent_transform via label, e.g.
+# //tools/agents:reviewer.
+agent(name = "reviewer", harness = ":cc", model = ":opus48")
+agent(name = "porter", harness = ":cc", model = ":gpt55")

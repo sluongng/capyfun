@@ -7,6 +7,11 @@ incrementally and deterministically. Export is deferred until import is solid.
 Read `../../CLAUDE.md` first for the project thesis. Keep each milestone small,
 runnable, and tested. Run `cargo test` and `cargo clippy` before finishing one.
 
+The **transformation system** (imperative + generative transforms) builds on
+this import spine and has its own spec and milestones (T1–T5) in
+`../design/transformations.md`. Do not start transforms before the plain mirror
+round-trip (M3–M5) works.
+
 ## Key decisions
 
 - **Language:** Rust. Git plumbing via `git2` (libgit2) for the first prototype;

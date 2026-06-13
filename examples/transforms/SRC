@@ -1,0 +1,11 @@
+# Root SRC for the transforms showcase monorepo.
+#
+# NOTE: This example is a forward-looking SYNTAX PREVIEW. The transform and
+# agent builtins it uses land in the milestones in
+# docs/design/transformations.md (T1-T5); `capyfun config` cannot evaluate it
+# yet. See examples/monorepo for the currently-evaluable example.
+
+monorepo(
+    name = "tinytree",
+    default_branch = "main",
+)

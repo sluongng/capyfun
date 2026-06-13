@@ -1,0 +1,16 @@
+Subject: [PATCH] pin Go toolchain for reproducible monorepo builds
+
+A tip-layer local modification, applied on top of the structurally-rewritten
+mirror. Rebased onto the new tip on every import.
+
+---
+diff --git a/go.mod b/go.mod
+index 1111111..2222222 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,5 +1,7 @@
+ module acme/widget
+
+ go 1.21
++
++toolchain go1.21.6

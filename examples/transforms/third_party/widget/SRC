@@ -1,0 +1,34 @@
+# Import `acme/widget`, transforming it as it lands under //third_party/widget.
+#
+# The pipeline shows both phases (see docs/design/transformations.md):
+#   - structural (mirror-time, applied per replayed commit): replace, move,
+#     rewrite_message
+#   - local-modification (tip, applied once on top): apply_patch, agent_transform
+#
+# The template file is referenced via template(...) below, not load()ed.
+
+github_import(
+    name = "widget",
+    repo = "acme/widget",
+    ref = "refs/heads/main",
+    transforms = [
+        # --- structural: rewrite the whole mirrored history consistently ---
+        # Scrub internal references everywhere.
+        replace(before = "acme.internal/", after = "", paths = ["**/*.go"]),
+        # Relocate to the monorepo's layout.
+        move(src = "pkg", dst = "lib"),
+        # Drop an internal trailer from every commit message.
+        rewrite_message(strip_trailers = ["Internal-Review"]),
+
+        # --- local modifications: applied on top, rebased each import ---
+        apply_patch("patches/0001-pin-toolchain.patch"),
+        agent_transform(
+            agent = "//tools/agents:reviewer",
+            prompt = template(
+                "//tools/agents/prompts:port.tmpl",
+                vars = {"style": "//docs:STYLE.md"},
+            ),
+            paths = ["lib/**"],
+        ),
+    ],
+)

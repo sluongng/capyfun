@@ -1,0 +1,23 @@
+You are porting an upstream change into the tinytree monorepo.
+
+Apply the incoming upstream change to the code in this package, adapting it to
+the monorepo's conventions. Follow the style guide:
+
+{{style}}
+
+## Incoming upstream change
+
+{{origin_message}}
+
+```diff
+{{incoming_diff}}
+```
+
+Touched files: {{changed_files}}
+
+## Existing code in this package
+
+{{repo_context}}
+
+Make the minimal edits needed so the change fits the monorepo. Do not introduce
+unrelated changes. Output only the edits.
