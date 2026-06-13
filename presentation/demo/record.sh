@@ -14,8 +14,11 @@ export CAPYFUN_BIN="$REPO_ROOT/target/debug/capyfun"
 
 OUT="$REPO_ROOT/presentation/demo.cast"
 echo "==> recording -> $OUT"
+# asciicast-v2: the format asciinema-player (used by presentation/demo.html)
+# can load. asciinema 3.x records v3 by default, which the player can't read.
 asciinema rec "$OUT" \
   --overwrite --headless --window-size 200x48 \
+  --output-format asciicast-v2 \
   --idle-time-limit 2.5 \
   --title "CapyFun - import + transform a dependency into the monorepo" \
   -c "bash '$HERE/drive.sh'"
