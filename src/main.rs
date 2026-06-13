@@ -304,6 +304,7 @@ fn run_reconcile(args: ReconcileArgs) -> Result<()> {
         }
     };
 
+    use capyfun::reconcile::{do_export, do_import, do_vendor};
     for i in &ir.imports {
         if target.is_none_or(|t| t == i.label) {
             run(&i.label, do_import(&repo, &ir, i, &args.root, args.refresh));
@@ -359,42 +360,9 @@ fn run_vendor(args: ImportArgs) -> Result<()> {
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
 
-    let summary = do_vendor(&repo, &ir, vendor)?;
+    let summary = capyfun::reconcile::do_vendor(&repo, &ir, vendor)?;
     println!("{}: {summary}", vendor.label);
     Ok(())
-}
-
-/// Vendor one pinned snapshot: fetch the declared commit and (re)materialize its
-/// tree into the package, advancing the monorepo branch. Idempotent. Returns a
-/// one-line summary. Shared by the reconciler and the `vendor` command.
-fn do_vendor(
-    repo: &git2::Repository,
-    ir: &capyfun::ir::Ir,
-    vendor: &capyfun::ir::Vendor,
-) -> Result<String> {
-    let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
-    let branch_tip = repo.find_reference(&branch_ref).ok().and_then(|r| r.target());
-
-    let url = origin_url(&vendor.repo);
-    let commit = capyfun::engine::fetch_commit(repo, &url, &vendor.commit)?;
-    let outcome =
-        capyfun::engine::vendor_snapshot(repo, &vendor.dest, &vendor.repo, commit, branch_tip)?;
-
-    match outcome.head {
-        Some(head) if Some(head) != branch_tip => {
-            repo.reference(
-                &branch_ref,
-                head,
-                true,
-                &format!("capyfun vendor {}", vendor.label),
-            )?;
-            Ok(format!(
-                "vendored {}@{} into {}; {branch_ref} now {head}",
-                vendor.repo, vendor.commit, vendor.dest
-            ))
-        }
-        _ => Ok(format!("already vendored at {}", vendor.commit)),
-    }
 }
 
 fn run_gen_go(args: GenGoArgs) -> Result<()> {
@@ -686,15 +654,6 @@ fn run_config(args: ConfigArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a GitHub `owner/name` slug to a fetchable URL.
-///
-/// `CAPYFUN_GITHUB_BASE` overrides the GitHub base (used to point imports at
-/// local bare repositories in hermetic tests/demos); otherwise the public
-/// GitHub HTTPS URL is used.
-fn origin_url(slug: &str) -> String {
-    capyfun::vendorgen::github_url(slug)
-}
-
 fn run_import(args: ImportArgs) -> Result<()> {
     let raw = capyfun::config::evaluate(&args.root)?;
     let ir = capyfun::ir::compile(&raw)
@@ -720,200 +679,9 @@ fn run_import(args: ImportArgs) -> Result<()> {
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
 
-    let summary = do_import(&repo, &ir, import, &args.root, args.refresh)?;
+    let summary = capyfun::reconcile::do_import(&repo, &ir, import, &args.root, args.refresh)?;
     println!("{}: {summary}", import.label);
     Ok(())
-}
-
-/// Run one import: fetch the origin, (re)apply the mirror + tip layers via the
-/// engine, and advance the monorepo branch. Idempotent — a no-op when there is
-/// nothing new. Returns a one-line summary. The reconciler and the `import`
-/// command share this so their behavior cannot drift.
-fn do_import(
-    repo: &git2::Repository,
-    ir: &capyfun::ir::Ir,
-    import: &capyfun::ir::Import,
-    root: &std::path::Path,
-    refresh: bool,
-) -> Result<String> {
-    // Current tip of the monorepo branch we import onto.
-    let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
-    let branch_tip = repo.find_reference(&branch_ref).ok().and_then(|r| r.target());
-
-    // Fetch the origin ref into the monorepo's object store.
-    let url = origin_url(&import.repo);
-    let origin_tip = capyfun::engine::fetch_commit(repo, &url, &import.git_ref)?;
-
-    // Read the patch series from the working tree.
-    let patches = import
-        .patches
-        .iter()
-        .map(|p| {
-            let bytes =
-                std::fs::read(root.join(p)).with_context(|| format!("reading patch {p}"))?;
-            Ok(capyfun::engine::PatchFile {
-                label: p.clone(),
-                bytes,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Resolve the declared tip-phase transforms (ordered: apply_patch +
-    // agent_transform) into engine-facing structs. IR resolution and file reads
-    // live here so the engine stays decoupled from `ir`.
-    let tips = resolve_tip_transforms(ir, import, root)?;
-
-    let runner = capyfun::engine::LiveRunner;
-    let tip_layer = capyfun::engine::TipLayer {
-        patches: &patches,
-        tips: &tips,
-        runner: &runner,
-        refresh,
-    };
-    let outcome = capyfun::engine::import(
-        repo,
-        &import.dest,
-        origin_tip,
-        branch_tip,
-        &import.transforms,
-        &tip_layer,
-    )?;
-
-    match outcome.head {
-        Some(head) if Some(head) != branch_tip => {
-            repo.reference(
-                &branch_ref,
-                head,
-                true,
-                &format!("capyfun import {}", import.label),
-            )?;
-            let t = &outcome.tip;
-            Ok(format!(
-                "imported {} commit(s) into {}; {branch_ref} now {head} \
-                 (tip: {} patch, {} agent, cache {}h/{}m)",
-                outcome.imported,
-                import.dest,
-                t.patch_commits,
-                t.agent_commits,
-                t.agent_cache_hits,
-                t.agent_cache_misses
-            ))
-        }
-        _ => Ok("already up to date".to_owned()),
-    }
-}
-
-/// Resolve an import's declared tip-phase transforms into engine [`TipTransform`]s.
-///
-/// `apply_patch` reads the patch bytes from the working tree (mirroring the
-/// `patches=[]` handling); `agent_transform` resolves the agent label →
-/// harness/model, reads the prompt-template `.tmpl` file, and substitutes the
-/// user `vars` (file-label vars are read from disk). Engine-derived context vars
-/// are filled later by the engine.
-fn resolve_tip_transforms(
-    ir: &capyfun::ir::Ir,
-    import: &capyfun::ir::Import,
-    root: &std::path::Path,
-) -> Result<Vec<capyfun::engine::TipTransform>> {
-    use capyfun::transform::Transform;
-
-    let mut out = Vec::new();
-    for t in &import.transforms {
-        match t {
-            Transform::ApplyPatch { file } => {
-                let bytes = std::fs::read(root.join(file))
-                    .with_context(|| format!("reading apply_patch file {file}"))?;
-                out.push(capyfun::engine::TipTransform::Patch(
-                    capyfun::engine::PatchFile {
-                        label: file.clone(),
-                        bytes,
-                    },
-                ));
-            }
-            Transform::AgentTransform {
-                agent,
-                prompt_template,
-                vars,
-                paths,
-            } => {
-                let inv = resolve_agent_invocation(ir, agent, prompt_template, vars, paths, root)?;
-                out.push(capyfun::engine::TipTransform::Agent(inv));
-            }
-            // Mirror-phase transforms are applied per commit, not in the tip.
-            _ => {}
-        }
-    }
-    Ok(out)
-}
-
-/// Resolve one `agent_transform` into an [`AgentInvocation`]: agent label →
-/// harness kind + model (provider/id/credential), read the prompt-template file,
-/// and substitute the user `vars` (a `//`-label var value is read from the file
-/// it points at; a plain string is used verbatim).
-fn resolve_agent_invocation(
-    ir: &capyfun::ir::Ir,
-    agent_label: &str,
-    prompt_template_label: &str,
-    vars: &[(String, String)],
-    paths: &[String],
-    root: &std::path::Path,
-) -> Result<capyfun::engine::AgentInvocation> {
-    let agent = ir
-        .agents
-        .iter()
-        .find(|a| a.label == agent_label)
-        .ok_or_else(|| anyhow::anyhow!("agent `{agent_label}` does not resolve"))?;
-    let harness = ir
-        .harnesses
-        .iter()
-        .find(|h| h.label == agent.harness)
-        .ok_or_else(|| anyhow::anyhow!("harness `{}` does not resolve", agent.harness))?;
-    let model = ir
-        .models
-        .iter()
-        .find(|m| m.label == agent.model)
-        .ok_or_else(|| anyhow::anyhow!("model `{}` does not resolve", agent.model))?;
-    let prompt_template = ir
-        .prompt_templates
-        .iter()
-        .find(|p| p.label == prompt_template_label)
-        .ok_or_else(|| {
-            anyhow::anyhow!("prompt_template `{prompt_template_label}` does not resolve")
-        })?;
-
-    let kind = capyfun::agent::HarnessKind::parse(&harness.kind)?;
-
-    // Read the template, then substitute the user vars (engine fills context vars).
-    let mut prompt = std::fs::read_to_string(root.join(&prompt_template.src))
-        .with_context(|| format!("reading prompt template {}", prompt_template.src))?;
-    for (key, value) in vars {
-        // A `//`-anchored value is a file label: read its contents; otherwise the
-        // value is a literal string.
-        let rendered = if let Some(rest) = value.strip_prefix("//") {
-            // `//docs:STYLE.md` -> `docs/STYLE.md`; `//path/to/file` -> as-is.
-            let rel = match rest.split_once(':') {
-                Some(("", name)) => name.to_owned(),
-                Some((pkg, name)) => format!("{pkg}/{name}"),
-                None => rest.to_owned(),
-            };
-            std::fs::read_to_string(root.join(&rel))
-                .with_context(|| format!("reading var `{key}` file {value}"))?
-        } else {
-            value.clone()
-        };
-        prompt = prompt.replace(&format!("{{{{{key}}}}}"), &rendered);
-    }
-
-    Ok(capyfun::engine::AgentInvocation {
-        harness: kind,
-        provider: model.provider.clone(),
-        model_id: model.id.clone(),
-        credential: model.credential.clone(),
-        base_url: None,
-        prompt,
-        agent_id: agent.label.clone(),
-        paths: paths.to_vec(),
-    })
 }
 
 fn run_export(args: ExportArgs) -> Result<()> {
@@ -941,104 +709,8 @@ fn run_export(args: ExportArgs) -> Result<()> {
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
 
-    let summary = do_export(&repo, &ir, export, args.no_pr)?;
+    let summary = capyfun::reconcile::do_export(&repo, &ir, export, args.no_pr)?;
     println!("{}: {summary}", export.label);
     Ok(())
 }
 
-/// Run one export: project the monorepo path onto the destination (prefix
-/// stripped, transforms applied), push the export branch, and open a PR (unless
-/// suppressed). Idempotent — a no-op when nothing new has landed. Returns a
-/// one-line summary (it preserves the `already up to date` phrasing). Shared by
-/// the reconciler and the `export` command.
-fn do_export(
-    repo: &git2::Repository,
-    ir: &capyfun::ir::Ir,
-    export: &capyfun::ir::Export,
-    no_pr: bool,
-) -> Result<String> {
-    // Current tip of the monorepo branch we export from.
-    let mono_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
-    let mono_tip = repo
-        .find_reference(&mono_ref)
-        .ok()
-        .and_then(|r| r.target())
-        .with_context(|| format!("monorepo branch {mono_ref} has no commits to export"))?;
-
-    // Fetch the destination branch into the object store: it is the commit-map
-    // source of truth for what has already shipped. A destination with no such
-    // branch yet (a fresh repo) means nothing has shipped.
-    let url = origin_url(&export.repo);
-    let dest_tip =
-        capyfun::engine::fetch_commit(repo, &url, &format!("refs/heads/{}", export.branch)).ok();
-
-    let outcome =
-        capyfun::engine::export(repo, &export.from, mono_tip, dest_tip, &export.transforms)?;
-
-    match outcome.head {
-        Some(head) if Some(head) != dest_tip => {
-            let export_branch = format!("capyfun/export-{}", export.name);
-            capyfun::engine::push_branch(repo, &url, head, &export_branch)?;
-            open_pr(export, &export_branch, no_pr)?;
-            Ok(format!(
-                "exported {} commit(s) from {}; pushed branch {} to {}",
-                outcome.exported, export.from, export_branch, export.repo
-            ))
-        }
-        _ => Ok(format!("already up to date on {}", export.repo)),
-    }
-}
-
-/// Open a GitHub PR for a pushed export branch, or explain why it was skipped.
-///
-/// PR creation shells out to the GitHub CLI (`gh`). It is skipped — printing the
-/// equivalent command instead — when `--no-pr` is set or the destination is a
-/// local repository (`CAPYFUN_GITHUB_BASE`), so hermetic demos/tests exercise the
-/// full branch push without needing network access or a real forge.
-fn open_pr(export: &capyfun::ir::Export, branch: &str, no_pr: bool) -> Result<()> {
-    let title = format!("Export {} from the monorepo", export.name);
-    let body = format!(
-        "Automated export by CapyFun from `{}`.\n\n\
-         Each commit carries a `CapyFun-Export` trailer mapping it back to the \
-         monorepo commit it reflects.",
-        export.from
-    );
-
-    let local_dest = std::env::var("CAPYFUN_GITHUB_BASE").is_ok();
-    if no_pr || local_dest {
-        let why = if no_pr {
-            "--no-pr"
-        } else {
-            "local destination (CAPYFUN_GITHUB_BASE)"
-        };
-        println!("skipping PR ({why}); to open it yourself, run:");
-        println!(
-            "  gh pr create --repo {} --base {} --head {} --title {:?}",
-            export.repo, export.branch, branch, title
-        );
-        return Ok(());
-    }
-
-    let status = std::process::Command::new("gh")
-        .args([
-            "pr",
-            "create",
-            "--repo",
-            &export.repo,
-            "--base",
-            &export.branch,
-            "--head",
-            branch,
-            "--title",
-            &title,
-            "--body",
-            &body,
-        ])
-        .status()
-        .context("running `gh pr create` (is the GitHub CLI installed and authenticated?)")?;
-    if !status.success() {
-        bail!("`gh pr create` failed");
-    }
-    println!("opened PR: {} <- {} on {}", export.branch, branch, export.repo);
-    Ok(())
-}
