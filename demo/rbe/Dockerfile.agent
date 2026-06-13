@@ -1,0 +1,32 @@
+# CapyFun remote-execution agent image.
+#
+# A BuildBuddy RBE executor image that can run an `agent_transform`: it needs a
+# shell + git (CapyFun's wrapper does `sh -c 'cd w && exec "$@"'`) and the agent
+# harness CLI (Claude Code here). Build and push to a registry BuildBuddy can
+# pull, then point the `container-image` platform property at it:
+#
+#   docker build -f demo/rbe/Dockerfile.agent -t ghcr.io/<you>/capyfun-agent:latest .
+#   docker push ghcr.io/<you>/capyfun-agent:latest
+#   export BUILDBUDDY_EXEC_IMAGE=docker://ghcr.io/<you>/capyfun-agent:latest
+#
+# The model credential is NOT baked in: store ANTHROPIC_API_KEY as a BuildBuddy
+# secret, which BuildBuddy injects as an env var into the action at execution
+# time (so it never enters the Action digest). See docs/design/remote-execution.md.
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git curl nodejs npm \
+ && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI (the `claude` harness). Pin a version for reproducible actions
+# so the executor image is part of a stable, cacheable Action.
+ARG CLAUDE_CODE_VERSION=latest
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
+
+# Sanity: the harness and shell tools CapyFun invokes are present.
+RUN command -v sh && command -v git && command -v claude
+
+# Actions run as a non-root user on most RBE pools.
+RUN useradd -m runner
+USER runner
+WORKDIR /home/runner

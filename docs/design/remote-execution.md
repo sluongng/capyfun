@@ -11,19 +11,20 @@ the README and the "run reconciles in a sandbox" safety requirement in
 Read `../../CLAUDE.md` and `transformations.md` first. This is a design/roadmap
 artifact; the buildable first slice (R0–R3) is spec'd at the end.
 
-> **Status:** the REAPI client foundation (R0–R1) is implemented and tested in
-> `src/remote/` — vendored v2 protos compiled via `build.rs` (`proto`), SHA256
-> digests + the `Directory` Merkle tree (`digest`), `Command`/`Action`
-> construction with a stable cache-key digest that excludes the credential
-> (`action`), and a blocking gRPC client with `x-buildbuddy-api-key` auth over
-> CAS / Action Cache / Execute (`client`). A live CAS+AC round-trip against
-> BuildBuddy Cloud is verified (gated on `BUILDBUDDY_API_KEY`). Still to do:
-> wire a `RemoteRunner` into the engine seam (R2), use `GetActionResult` as the
-> agent-output cache (R3), and fan reconcile transforms out to the pool (R4).
-> The local path (`src/engine/agent_exec.rs`, `LiveRunner` + blake3 cache)
-> remains the baseline this augments. Scope: **Tier 1** (one `agent_transform`
-> → one REAPI Action) against **BuildBuddy Cloud**, **Action Cache as the
-> agent-output cache**.
+> **Status:** R0–R4 implemented and tested in `src/remote/` + the engine.
+> R0–R1: vendored v2 protos via `build.rs` (`proto`), SHA256 digests + the
+> `Directory` Merkle tree (`digest`), `Command`/`Action` with a stable cache-key
+> digest that excludes the credential (`action`), and a blocking gRPC client with
+> `x-buildbuddy-api-key` auth (`client`). R2/R3: `RemoteExecutor` runs a transform
+> as an Action and materializes its output subtree back into the workdir, with the
+> **Action Cache as the agent-output cache** (`executor`); `RemoteRunner`
+> (`engine::agent_exec`) is the `AgentRunner` for the remote backend. R4:
+> `reconcile::Executor` (local|remote) and a `--executor` flag on `import` /
+> `reconcile`. Live CAS+AC round-trips and a live `sh` remote-execution +
+> cache-hit are verified against BuildBuddy Cloud (gated on `BUILDBUDDY_API_KEY`).
+> Remaining: a claude-capable executor image + the model-key secret to run a real
+> `agent_transform` end-to-end (see **Demo** below). The local path
+> (`LiveRunner` + blake3 cache) remains the default.
 
 ## Thesis: an `agent_transform` *is* a REAPI Action
 
@@ -235,22 +236,78 @@ gated behind an env-keyed integration test so `cargo test` stays hermetic.
   the key comes from `BUILDBUDDY_API_KEY` and is excluded from the Action digest
   by construction (the `ActionSpec` has no credential field).
 
+## Demo: a real `agent_transform` on BuildBuddy Cloud
+
+The goal demo runs a CapyFun import whose `agent_transform` executes **on
+BuildBuddy's RBE pool**, shows the edit replayed into the monorepo, and shows the
+re-run served from the **Action Cache** (no agent run). Two pieces are
+environment, not code:
+
+**1. A claude-capable executor image.** The harness must exist on the worker. We
+build a small image (`demo/rbe/Dockerfile.agent`) with `sh`, `git`, and the Claude
+Code CLI, push it to a registry BuildBuddy can pull, and point the
+`container-image` platform property at it:
+
+```
+OSFamily=Linux
+container-image=docker://ghcr.io/<you>/capyfun-agent:latest
+dockerNetwork=standard        # agents need egress to the model API
+```
+
+`dockerNetwork=standard` resolves the **network-egress** question: BuildBuddy
+actions are network-isolated by default; this opts the action into egress so the
+harness can reach the model endpoint. (Borrowing rules_claude's pinned-binary
+idea into the input root instead of an image is a future refinement; an image is
+the simplest robust path for the demo.)
+
+**2. The model key as a BuildBuddy secret — *not* an env var in the action.**
+BuildBuddy **secrets** are encrypted, injected into remote actions as environment
+variables at execution time, and are **not part of the Command/Action** the
+client builds — so the key never enters the Action digest (and rotating it does
+not bust the cache). Store `ANTHROPIC_API_KEY` as a BuildBuddy org secret; the
+harness reads it from the environment on the worker. This resolves the
+model-credential open question: secrets, not `Command.environment_variables`.
+
+Demo flow (`scripts/demo-rbe.sh`):
+
+```sh
+export BUILDBUDDY_API_KEY=...                 # CapyFun→BuildBuddy auth (gRPC header)
+export BUILDBUDDY_EXEC_IMAGE=docker://ghcr.io/<you>/capyfun-agent:latest
+# ANTHROPIC_API_KEY is a BuildBuddy secret, set once in the BuildBuddy UI.
+
+# Cache miss: the agent_transform runs on a BuildBuddy worker; the edited
+# subtree is replayed into the monorepo.
+capyfun import //third_party/widget:widget --executor remote
+
+# Re-run: identical Action digest → Action Cache hit, no agent run.
+capyfun import //third_party/widget:widget --executor remote
+#   ... (tip: 0 patch, 1 agent, cache 1h/0m)   <- served from the AC
+```
+
+**Runnable today (the mechanism, without a custom image).** `scripts/demo-rbe.sh`
+also runs the gated live tests, which already exercise the full real path against
+BuildBuddy Cloud with a stock `busybox` image: a CAS round-trip and a remote `sh`
+action whose output subtree is materialized back and whose re-run is an AC hit.
+This proves upload → Execute → output-tree materialize → AC cache against the real
+service; swapping `BUILDBUDDY_EXEC_IMAGE` for the claude image upgrades it to a
+real agent run.
+
+## Resolved (by R2–R4)
+
+- **Model credential** → a **BuildBuddy secret** injected as a worker env var, out
+  of the Action digest (see Demo). **Network egress** → `dockerNetwork=standard`.
+- **Harness on the executor** → a prebuilt image for the demo
+  (`demo/rbe/Dockerfile.agent`); pinned-binary-in-input-root remains a future
+  in-grain refinement.
+
 ## Open questions
 
-- **BuildBuddy secret mechanism** for the *model* API key (the one the agent uses
-  inside the action), so it stays out of the Action digest — platform header,
-  BuildBuddy secrets, or a sidecar? (The *BuildBuddy* key is solved above; this
-  is the distinct in-action model credential.)
-- **Network egress policy** granularity on BuildBuddy actions (per-endpoint
-  allowlist vs all-or-nothing).
 - **Directory serialization fidelity:** the filesystem→`Directory` mapping is in;
   open whether a direct `git2::Tree`→`Directory` path is worth it and whether the
   round-trip preserves the tree OID on re-import (empty dirs, mode bits).
-- **Harness availability on executors:** vendored pinned binary in `input_root`
-  (preferred, in-grain) vs a prebuilt executor image — which is more robust for
-  Claude Code / Codex / `pi`?
 - **Reproducibility vs freshness:** when (if ever) should a reconcile bypass the
   AC to let an agent re-run against newer upstream context, given record-and-
   replay otherwise pins the first patch forever?
-</content>
-</invoke>
+- **Cross-target concurrency:** per-repo reconciles are sequential (git2 ref
+  contention); the per-target-ref design in `automation.md` is the path to true
+  parallel fan-out across targets.
