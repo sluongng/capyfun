@@ -255,7 +255,7 @@ pub struct ImportOutcome {
 /// `CapyFun-Import` trailer matches `dest`. Scoping by `dest` lets several
 /// imports share one branch without conflating their commit maps. Returns `None`
 /// when this import has nothing yet.
-fn last_imported_origin(repo: &Repository, base: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
+pub fn last_imported_origin(repo: &Repository, base: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
     let mut cur = base;
     while let Some(c) = cur {
         let commit = repo.find_commit(c)?;
@@ -275,7 +275,7 @@ fn last_imported_origin(repo: &Repository, base: Option<Oid>, dest: &str) -> Res
 /// First-parent commits strictly newer than `stop` on `tip`'s chain, ordered
 /// oldest → newest. When `stop` is `None`, returns the whole chain. Errors if
 /// `stop` is set but not on the chain (upstream history diverged / was rewritten).
-fn first_parent_delta(repo: &Repository, tip: Oid, stop: Option<Oid>) -> Result<Vec<Oid>> {
+pub fn first_parent_delta(repo: &Repository, tip: Oid, stop: Option<Oid>) -> Result<Vec<Oid>> {
     let mut chain = Vec::new();
     let mut cur = Some(tip);
     while let Some(c) = cur {
@@ -368,7 +368,7 @@ pub const VENDOR_TRAILER: &str = "CapyFun-Vendor";
 
 /// The commit a `dest` is currently vendored at, from the most recent
 /// `CapyFun-Vendor` trailer scoped to `dest`. `None` if not yet vendored.
-fn last_vendored(repo: &Repository, base: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
+pub fn last_vendored(repo: &Repository, base: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
     let mut cur = base;
     while let Some(c) = cur {
         let commit = repo.find_commit(c)?;
@@ -492,7 +492,7 @@ fn with_export_trailer(message: &str, mono: Oid) -> String {
 /// [`EXPORT_TRAILER`] along `dest_tip`'s first-parent chain. Each destination
 /// repository is dedicated to one export (the prefix is stripped), so no further
 /// scoping is needed. Returns `None` when nothing has shipped yet.
-fn last_exported(repo: &Repository, dest_tip: Option<Oid>) -> Result<Option<Oid>> {
+pub fn last_exported(repo: &Repository, dest_tip: Option<Oid>) -> Result<Option<Oid>> {
     let mut cur = dest_tip;
     while let Some(c) = cur {
         let commit = repo.find_commit(c)?;
