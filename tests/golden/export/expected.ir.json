@@ -4,6 +4,7 @@
     "default_branch": "main"
   },
   "imports": [],
+  "vendors": [],
   "exports": [
     {
       "label": "//sdk/go:go-sdk",

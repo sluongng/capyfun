@@ -23,6 +23,8 @@ enum Command {
     GenGo(GenGoArgs),
     /// Replay an external repository's commits into a monorepo path.
     Import(ImportArgs),
+    /// Vendor a pinned snapshot of a `git_repository` rule into its package.
+    Vendor(ImportArgs),
     /// Publish a monorepo path to a destination remote as a GitHub PR.
     Export(ExportArgs),
 }
@@ -75,8 +77,62 @@ fn main() -> Result<()> {
         Command::Check(args) => run_check(args),
         Command::GenGo(args) => run_gen_go(args),
         Command::Import(args) => run_import(args),
+        Command::Vendor(args) => run_vendor(args),
         Command::Export(args) => run_export(args),
     }
+}
+
+fn run_vendor(args: ImportArgs) -> Result<()> {
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+
+    let vendor = ir
+        .vendors
+        .iter()
+        .find(|v| v.label == args.label)
+        .ok_or_else(|| {
+            let labels: Vec<&str> = ir.vendors.iter().map(|v| v.label.as_str()).collect();
+            anyhow::anyhow!(
+                "no git_repository labeled `{}` (available: {})",
+                args.label,
+                if labels.is_empty() {
+                    "none".into()
+                } else {
+                    labels.join(", ")
+                }
+            )
+        })?;
+
+    let repo = git2::Repository::open(&args.root)
+        .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
+    let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
+    let branch_tip = repo
+        .find_reference(&branch_ref)
+        .ok()
+        .and_then(|r| r.target());
+
+    let url = origin_url(&vendor.repo);
+    let commit = capyfun::engine::fetch_commit(&repo, &url, &vendor.commit)?;
+    let outcome =
+        capyfun::engine::vendor_snapshot(&repo, &vendor.dest, &vendor.repo, commit, branch_tip)?;
+
+    match outcome.head {
+        Some(head) if Some(head) != branch_tip => {
+            repo.reference(
+                &branch_ref,
+                head,
+                true,
+                &format!("capyfun vendor {}", vendor.label),
+            )?;
+            println!(
+                "vendored {}@{} into {}; {} now {}",
+                vendor.repo, vendor.commit, vendor.dest, branch_ref, head
+            );
+        }
+        _ => println!("{} is already vendored at {}", vendor.label, vendor.commit),
+    }
+    Ok(())
 }
 
 fn run_gen_go(args: GenGoArgs) -> Result<()> {
@@ -169,6 +225,13 @@ fn run_config(args: ConfigArgs) -> Result<()> {
                 println!(
                     "{}:{}  github_export repo={} branch={} from={}",
                     e.package, e.name, e.repo, e.branch, from
+                );
+            }
+            capyfun::config::Decl::GitRepo(g) => {
+                let into = g.into.as_deref().unwrap_or("<package>");
+                println!(
+                    "{}:{}  git_repository repo={} commit={} into={}",
+                    g.package, g.name, g.repo, g.commit, into
                 );
             }
         }

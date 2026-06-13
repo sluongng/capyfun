@@ -1,0 +1,11 @@
+# Harness plugins, vendored as pinned snapshots. Package //tools/plugins.
+#
+# `git_repository` fetches the repo at an exact commit and materializes that
+# snapshot into this package (no upstream history) — the content-addressed,
+# reproducible way to bring an external plugin into the monorepo as runfiles.
+
+git_repository(
+    name = "bazel",
+    repo = "acme/cc-plugin-bazel",
+    commit = "1111111111111111111111111111111111111111",
+)

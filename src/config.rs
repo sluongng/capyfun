@@ -40,6 +40,8 @@ pub enum Decl {
     Import(ImportDecl),
     #[serde(rename = "github_export")]
     Export(ExportDecl),
+    #[serde(rename = "git_repository")]
+    GitRepo(GitRepoDecl),
 }
 
 impl Decl {
@@ -49,6 +51,7 @@ impl Decl {
             Decl::Monorepo(_) => "monorepo",
             Decl::Import(_) => "github_import",
             Decl::Export(_) => "github_export",
+            Decl::GitRepo(_) => "git_repository",
         }
     }
 
@@ -58,6 +61,7 @@ impl Decl {
             Decl::Monorepo(d) => &d.package,
             Decl::Import(d) => &d.package,
             Decl::Export(d) => &d.package,
+            Decl::GitRepo(d) => &d.package,
         }
     }
 }
@@ -94,6 +98,18 @@ pub struct ExportDecl {
     pub repo: String,
     /// Destination branch the PR targets.
     pub branch: String,
+    pub package: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitRepoDecl {
+    pub name: String,
+    /// GitHub `owner/name` slug.
+    pub repo: String,
+    /// Exact commit SHA to vendor (the pin).
+    pub commit: String,
+    /// Optional subpath within the declaring package; `None` means the package.
+    pub into: Option<String>,
     pub package: String,
 }
 
@@ -170,6 +186,26 @@ fn capyfun_globals(builder: &mut GlobalsBuilder) {
             git_ref: r#ref.to_owned(),
             into,
             patches: patches.items,
+            package,
+        }))?;
+        Ok(NoneType)
+    }
+
+    /// Vendor a pinned snapshot of a GitHub repo into the declaring package.
+    fn git_repository(
+        #[starlark(require = named)] name: String,
+        #[starlark(require = named)] repo: String,
+        #[starlark(require = named)] commit: String,
+        #[starlark(require = named)] into: Option<String>,
+        eval: &mut Evaluator,
+    ) -> anyhow::Result<NoneType> {
+        let s = state(eval)?;
+        let package = s.package.clone();
+        s.record(Decl::GitRepo(GitRepoDecl {
+            name,
+            repo,
+            commit,
+            into,
             package,
         }))?;
         Ok(NoneType)

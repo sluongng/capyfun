@@ -15,6 +15,7 @@ use crate::validate;
 pub struct Ir {
     pub monorepo: Monorepo,
     pub imports: Vec<Import>,
+    pub vendors: Vec<Vendor>,
     pub exports: Vec<Export>,
 }
 
@@ -38,6 +39,20 @@ pub struct Import {
     pub dest: String,
     /// Monorepo-root-relative patch files (resolved against the SRC package).
     pub patches: Vec<String>,
+}
+
+/// A pinned-snapshot git dependency (`git_repository`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Vendor {
+    pub label: String,
+    pub name: String,
+    pub package: String,
+    /// GitHub `owner/name` slug.
+    pub repo: String,
+    /// Exact commit SHA (the pin).
+    pub commit: String,
+    /// Monorepo-root-relative destination directory the snapshot lands in.
+    pub dest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,12 +124,36 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
         }
     };
 
-    // --- lower imports/exports ---
+    // --- lower imports/vendors/exports ---
     let mut imports = Vec::new();
+    let mut vendors = Vec::new();
     let mut exports = Vec::new();
     for decl in &raw.decls {
         match decl {
             Decl::Monorepo(_) => {}
+            Decl::GitRepo(d) => {
+                let label = format!("{}:{}", d.package, d.name);
+                validate::check_slug(&label, &d.repo, &mut errors);
+                validate::check_commit_sha(&label, &d.commit, &mut errors);
+                if let Some(into) = &d.into {
+                    validate::check_rel_path(&label, "into", into, &mut errors);
+                }
+                let dir = package_dir(&d.package);
+                let dest = join_dir(dir, d.into.as_deref());
+                if dest.is_empty() {
+                    errors.push(format!(
+                        "{label}: git_repository targets the monorepo root; declare it in a sub-package or set `into`"
+                    ));
+                }
+                vendors.push(Vendor {
+                    label,
+                    name: d.name.clone(),
+                    package: d.package.clone(),
+                    repo: d.repo.clone(),
+                    commit: d.commit.clone(),
+                    dest,
+                });
+            }
             Decl::Import(d) => {
                 let label = format!("{}:{}", d.package, d.name);
                 validate::check_slug(&label, &d.repo, &mut errors);
@@ -178,8 +217,30 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
     }
 
     // --- cross-rule checks ---
-    check_unique_names(&imports, &exports, &mut errors);
-    validate::check_destination_overlap(&imports, &mut errors);
+    // Names are unique per package across all rule kinds; destinations (imports
+    // and vendors both write into the tree) must not overlap.
+    let names: Vec<(&str, &str, &str)> = imports
+        .iter()
+        .map(|i| (i.package.as_str(), i.name.as_str(), i.label.as_str()))
+        .chain(
+            vendors
+                .iter()
+                .map(|v| (v.package.as_str(), v.name.as_str(), v.label.as_str())),
+        )
+        .chain(
+            exports
+                .iter()
+                .map(|e| (e.package.as_str(), e.name.as_str(), e.label.as_str())),
+        )
+        .collect();
+    check_unique_names(&names, &mut errors);
+
+    let dests: Vec<(&str, &str)> = imports
+        .iter()
+        .map(|i| (i.label.as_str(), i.dest.as_str()))
+        .chain(vendors.iter().map(|v| (v.label.as_str(), v.dest.as_str())))
+        .collect();
+    validate::check_destination_overlap(&dests, &mut errors);
 
     if !errors.is_empty() || monorepo.is_none() {
         errors.sort();
@@ -190,22 +251,23 @@ pub fn compile(raw: &RawConfig) -> Result<Ir, Vec<String>> {
     Ok(Ir {
         monorepo: monorepo.expect("checked above"),
         imports,
+        vendors,
         exports,
     })
 }
 
-/// Names must be unique per package across import and export rules.
-fn check_unique_names(imports: &[Import], exports: &[Export], errors: &mut Vec<String>) {
-    let entries = imports
-        .iter()
-        .map(|i| (&i.package, &i.name, &i.label))
-        .chain(exports.iter().map(|e| (&e.package, &e.name, &e.label)));
+/// Names must be unique per package across all rule kinds. `entries` are
+/// `(package, name, label)`.
+fn check_unique_names(entries: &[(&str, &str, &str)], errors: &mut Vec<String>) {
     let mut seen: Vec<(String, String)> = Vec::new();
-    for (package, name, label) in entries {
-        if seen.iter().any(|(p, n)| p == package && n == name) {
+    for &(package, name, label) in entries {
+        if seen
+            .iter()
+            .any(|(p, n)| p.as_str() == package && n.as_str() == name)
+        {
             errors.push(format!("duplicate rule name in package {package}: {label}"));
         } else {
-            seen.push((package.clone(), name.clone()));
+            seen.push((package.to_string(), name.to_string()));
         }
     }
 }

@@ -1,7 +1,19 @@
 //! Tests for lowering + validation.
 
 use super::*;
-use crate::config::{ExportDecl, ImportDecl, MonorepoDecl};
+use crate::config::{ExportDecl, GitRepoDecl, ImportDecl, MonorepoDecl};
+
+const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn git_repo(package: &str, name: &str) -> GitRepoDecl {
+    GitRepoDecl {
+        name: name.into(),
+        repo: "acme/plugin".into(),
+        commit: SHA.into(),
+        into: None,
+        package: package.into(),
+    }
+}
 
 fn mono(package: &str) -> Decl {
     Decl::Monorepo(MonorepoDecl {
@@ -139,6 +151,55 @@ fn export_lowers_source_path() {
     let ir = compile_decls(vec![mono("//"), Decl::Export(exp)]).unwrap();
     assert_eq!(ir.exports[0].from, "sdk/go");
     assert_eq!(ir.exports[0].label, "//sdk:sdk");
+}
+
+#[test]
+fn git_repository_lowers_to_vendor() {
+    let ir = compile_decls(vec![
+        mono("//"),
+        Decl::GitRepo(git_repo("//tools/cc", "cc")),
+    ])
+    .unwrap();
+    assert_eq!(ir.vendors.len(), 1);
+    let v = &ir.vendors[0];
+    assert_eq!(v.label, "//tools/cc:cc");
+    assert_eq!(v.repo, "acme/plugin");
+    assert_eq!(v.commit, SHA);
+    assert_eq!(v.dest, "tools/cc");
+}
+
+#[test]
+fn bad_commit_sha_errors() {
+    let mut g = git_repo("//tools/cc", "cc");
+    g.commit = "deadbeef".into();
+    let errs = compile_decls(vec![mono("//"), Decl::GitRepo(g)]).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("40-character hex SHA")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn vendor_and_import_destinations_must_not_overlap() {
+    // An import at //third_party and a git_repository nested under it conflict.
+    let imp = import("//third_party", "p");
+    let g = git_repo("//third_party/cc", "cc");
+    let errs = compile_decls(vec![mono("//"), Decl::Import(imp), Decl::GitRepo(g)]).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("destination overlap")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn vendor_name_collides_with_import_in_same_package() {
+    let imp = import("//tools/x", "dup");
+    let g = git_repo("//tools/x", "dup");
+    let errs = compile_decls(vec![mono("//"), Decl::Import(imp), Decl::GitRepo(g)]).unwrap_err();
+    assert!(
+        errs.iter().any(|e| e.contains("duplicate rule name")),
+        "{errs:?}"
+    );
 }
 
 #[test]

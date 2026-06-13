@@ -4,7 +4,15 @@
 //! rule's label) to an accumulator. The orchestration lives in [`crate::ir`];
 //! diagnostics are sorted there for deterministic output.
 
-use crate::ir::Import;
+/// Validate that `commit` is a full 40-character hex SHA (the pin).
+pub(crate) fn check_commit_sha(label: &str, commit: &str, errors: &mut Vec<String>) {
+    let ok = commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    if !ok {
+        errors.push(format!(
+            "{label}: commit `{commit}` must be a full 40-character hex SHA"
+        ));
+    }
+}
 
 /// Validate that `repo` is a well-formed GitHub `owner/name` slug.
 pub(crate) fn check_slug(label: &str, repo: &str, errors: &mut Vec<String>) {
@@ -55,14 +63,15 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     long.starts_with(&format!("{short}/"))
 }
 
-/// Reject imports whose destination directories overlap (equal or nested).
-pub(crate) fn check_destination_overlap(imports: &[Import], errors: &mut Vec<String>) {
-    for i in 0..imports.len() {
-        for j in (i + 1)..imports.len() {
-            if paths_overlap(&imports[i].dest, &imports[j].dest) {
+/// Reject rules whose destination directories overlap (equal or nested).
+/// `dests` are `(label, dest)` pairs across all tree-writing rules.
+pub(crate) fn check_destination_overlap(dests: &[(&str, &str)], errors: &mut Vec<String>) {
+    for i in 0..dests.len() {
+        for j in (i + 1)..dests.len() {
+            if paths_overlap(dests[i].1, dests[j].1) {
                 errors.push(format!(
                     "destination overlap: {} -> `{}` and {} -> `{}`",
-                    imports[i].label, imports[i].dest, imports[j].label, imports[j].dest
+                    dests[i].0, dests[i].1, dests[j].0, dests[j].1
                 ));
             }
         }

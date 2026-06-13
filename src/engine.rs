@@ -274,25 +274,104 @@ pub fn import_mirror(
     })
 }
 
-/// Fetch `refname` from `url` into `repo`'s object store and return the commit
-/// it points at. The objects become available locally so they can be replayed.
-pub fn fetch_commit(repo: &Repository, url: &str, refname: &str) -> Result<Oid> {
-    let tmp = "refs/capyfun/fetch_head";
+/// Fetch `want` from `url` into `repo`'s object store and return the commit it
+/// resolves to. `want` may be a refname (`refs/heads/main`, `refs/tags/v1`) or a
+/// full 40-hex commit SHA (fetched directly, where the server allows it). The
+/// objects become available locally so they can be replayed or vendored.
+pub fn fetch_commit(repo: &Repository, url: &str, want: &str) -> Result<Oid> {
     let mut remote = repo
         .remote_anonymous(url)
         .with_context(|| format!("opening remote {url}"))?;
-    let refspec = format!("+{refname}:{tmp}");
+
+    if want.len() == 40 && want.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // A pinned commit SHA: fetch the object directly (no ref created).
+        remote
+            .fetch(&[want], None, None)
+            .with_context(|| format!("fetching commit {want} from {url}"))?;
+        let oid = Oid::from_str(want)?;
+        repo.find_commit(oid)
+            .with_context(|| format!("fetched object {want} is not a commit"))?;
+        return Ok(oid);
+    }
+
+    let tmp = "refs/capyfun/fetch_head";
     remote
-        .fetch(&[&refspec], None, None)
-        .with_context(|| format!("fetching {refname} from {url}"))?;
+        .fetch(&[&format!("+{want}:{tmp}")], None, None)
+        .with_context(|| format!("fetching {want} from {url}"))?;
     let oid = repo
         .find_reference(tmp)?
         .target()
-        .with_context(|| format!("fetched ref {refname} has no target"))?;
+        .with_context(|| format!("fetched ref {want} has no target"))?;
     if let Ok(mut r) = repo.find_reference(tmp) {
         r.delete().ok();
     }
     Ok(oid)
+}
+
+// --- git_repository: vendor a pinned snapshot (no upstream history) ---
+
+/// Commit-message trailer recording a vendored snapshot's `repo@sha` pin.
+pub const VENDOR_TRAILER: &str = "CapyFun-Vendor";
+
+/// The commit a `dest` is currently vendored at, from the most recent
+/// `CapyFun-Vendor` trailer scoped to `dest`. `None` if not yet vendored.
+fn last_vendored(repo: &Repository, base: Option<Oid>, dest: &str) -> Result<Option<Oid>> {
+    let mut cur = base;
+    while let Some(c) = cur {
+        let commit = repo.find_commit(c)?;
+        let message = commit.message().unwrap_or("");
+        if trailer_value(message, IMPORT_TRAILER).as_deref() == Some(dest) {
+            if let Some(v) = trailer_value(message, VENDOR_TRAILER) {
+                if let Some((_, sha)) = v.rsplit_once('@') {
+                    return Ok(Some(Oid::from_str(sha)?));
+                }
+            }
+        }
+        cur = commit.parent_ids().next();
+    }
+    Ok(None)
+}
+
+/// Vendor a single pinned snapshot of `commit`'s tree into `dest` as one
+/// CapyFun-authored commit (no upstream history). Idempotent: re-running with the
+/// same commit is a no-op. Reserved metadata (`SRC`, `patches`) in the dest is
+/// preserved. `repo_slug` is recorded in the `CapyFun-Vendor` trailer.
+pub fn vendor_snapshot(
+    repo: &Repository,
+    dest: &str,
+    repo_slug: &str,
+    commit: Oid,
+    branch_tip: Option<Oid>,
+) -> Result<ImportOutcome> {
+    if last_vendored(repo, branch_tip, dest)? == Some(commit) {
+        return Ok(ImportOutcome {
+            imported: 0,
+            head: branch_tip,
+        });
+    }
+
+    let base_tree = match branch_tip {
+        Some(t) => repo.find_commit(t)?.tree()?.id(),
+        None => empty_tree(repo)?,
+    };
+    let snapshot_tree = repo.find_commit(commit)?.tree()?.id();
+    let dest_subtree = dest_subtree_preserving_metadata(repo, base_tree, dest, snapshot_tree)?;
+    let new_tree = repo.find_tree(splice_tree(repo, base_tree, dest, dest_subtree)?)?;
+
+    let sig = capyfun_signature()?;
+    let message = format!(
+        "Vendor {repo_slug}@{commit}\n\n{VENDOR_TRAILER}: {repo_slug}@{commit}\n{IMPORT_TRAILER}: {dest}\n"
+    );
+    let parent_commit: Option<Commit> = match branch_tip {
+        Some(t) => Some(repo.find_commit(t)?),
+        None => None,
+    };
+    let parents: Vec<&Commit> = parent_commit.iter().collect();
+    let head = repo.commit(None, &sig, &sig, &message, &new_tree, &parents)?;
+    Ok(ImportOutcome {
+        imported: 1,
+        head: Some(head),
+    })
 }
 
 // --- M6: patch layer (tip, rebased on the mirror tip) ---

@@ -30,8 +30,8 @@ discarding them:
 The config has two kinds of typed builtins:
 
 - **Rules** are named, instantiated only in SRC files, and recorded into the IR:
-  `monorepo`, `github_import`, `github_export`, and the agent tool rules
-  `harness`, `model`, `agent`, `prompt_template`.
+  `monorepo`, `github_import`, `github_export`, `git_repository`, and the agent
+  tool rules `harness`, `model`, `agent`, `prompt_template`.
 - **Value constructors** are pure functions that *return a typed value* and may
   be used anywhere (including `.scl` libraries, e.g. to define reusable
   transform constants): the transform constructors `replace`, `move`, `copy`,
@@ -186,6 +186,24 @@ See `examples/transforms/tools/{harness,models,agent}/SRC` for a worked set.
 
 The agent's identity for caching is `(harness kind, plugins digests, skills
 digests, model provider+id)`.
+
+#### Provisioning (how the runfiles get there)
+
+Harness binaries, plugins, and skills are external artifacts brought in by a
+content-addressed fetch rule. The implemented primitive is **`git_repository`**,
+which fetches a repo at an exact commit SHA and materializes that snapshot into
+its package (no upstream history) — reproducible and inspectable as source:
+
+```python
+# //tools/plugins/SRC
+git_repository(name = "bazel", repo = "acme/cc-plugin-bazel", commit = "<40-hex>")
+```
+
+`harness` references these by label (`plugins = ["//tools/plugins:bazel"]`). An
+`http_archive` rule (url + sha256, for released tarball harness binaries) is the
+natural follow-on; both follow the Bazel repo-rule pattern (digest-pinned,
+cached, materialized). Models carry no artifact — only a provider/id plus a
+credential reference resolved at execution time.
 
 ### Prompt templating
 

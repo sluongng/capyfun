@@ -1,0 +1,7 @@
+# Harness skills, vendored as pinned snapshots. Package //tools/skills.
+
+git_repository(
+    name = "review",
+    repo = "acme/cc-skill-review",
+    commit = "2222222222222222222222222222222222222222",
+)

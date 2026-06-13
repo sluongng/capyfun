@@ -1,0 +1,18 @@
+{
+  "decls": [
+    {
+      "kind": "monorepo",
+      "name": "acme",
+      "default_branch": "main",
+      "package": "//"
+    },
+    {
+      "kind": "git_repository",
+      "name": "cc-plugin",
+      "repo": "acme/cc-plugin",
+      "commit": "0123456789abcdef0123456789abcdef01234567",
+      "into": null,
+      "package": "//third_party/cc-plugin"
+    }
+  ]
+}

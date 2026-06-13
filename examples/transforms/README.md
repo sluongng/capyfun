@@ -1,9 +1,11 @@
 # Example: transformations + generative agents (syntax preview)
 
-> **Forward-looking.** This example uses transform and agent builtins that land
-> in the milestones in `../../docs/design/transformations.md` (T1–T5). It is a
-> syntax preview and is **not** evaluable by `capyfun config` yet. For the
-> currently-working config model, see `../monorepo`.
+> **Mostly forward-looking.** The transform and agent builtins (`replace`,
+> `harness`, `model`, `agent`, `agent_transform`, …) land in the milestones in
+> `../../docs/design/transformations.md` (T1–T5), so this tree is not evaluable
+> by `capyfun check` as a whole yet. The **`git_repository`** rule used in
+> `tools/plugins` and `tools/skills` *is* implemented — see `../monorepo` for the
+> fully-evaluable config model and `capyfun vendor` for git_repository in action.
 
 ## Layout
 
@@ -13,6 +15,8 @@ examples/transforms/
 ├── tools/
 │   ├── harness/SRC                      # harness rules (claude_code, codex, pi)
 │   ├── models/SRC                       # model rules (opus, gpt55, nemotron)
+│   ├── plugins/SRC                      # git_repository: vendored plugin snapshots
+│   ├── skills/SRC                       # git_repository: vendored skill snapshots
 │   └── agent/
 │       ├── SRC                          # agent rules (harness + model pairings)
 │       └── prompts/
