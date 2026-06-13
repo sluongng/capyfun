@@ -82,10 +82,12 @@ The mirror stays *faithful in the structural sense*: deterministic, and every
 commit still maps 1:1 to an origin commit via `CapyFun-Origin`. It is not
 byte-identical to upstream — it is upstream consistently relocated/scrubbed.
 
-Because structural transforms are part of the import's identity, **changing a
-structural transform invalidates the existing mirror** and requires a re-import
-(reset) of that edge. The commit map records the transform-set digest so this is
-detectable.
+The imported result is tracked in version control like any other monorepo
+content, so CapyFun does not try to detect or auto-rebuild a mirror when a
+structural transform definition changes. Reconciling an already-imported history
+with a changed transform set is a separate "evolve the changeset" concern (cf.
+the Mercurial evolution extension) and is **out of scope** — import only ever
+appends new upstream commits onto the existing mirror.
 
 ### Tip (local-modification) — applied once, on top
 
@@ -236,8 +238,8 @@ start them before the plain mirror round-trip works.
 - **T1 — Transform values + IR.** Typed transform value constructors and the
   `transforms = [...]` field; normalize into IR with phase tagging; validation.
 - **T2 — Structural transforms (mirror-time).** `move`/`copy`/`replace`/
-  `rewrite_message` applied per replayed commit; transform-set digest in the
-  commit map; re-import consistency.
+  `rewrite_message` applied per replayed commit; new upstream commits append to
+  the existing mirror.
 - **T3 — Tip transform layer.** Generalize the patch layer to an ordered tip
   pipeline of `apply_patch` (and later `agent_transform`) commits.
 - **T4 — Agent tool rules.** `harness`/`model`/`agent` rules, runfiles
