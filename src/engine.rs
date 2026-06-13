@@ -13,7 +13,7 @@ use crate::transform::Transform;
 
 pub mod agent_exec;
 
-pub use agent_exec::{AgentInvocation, AgentRunner, LiveRunner, PromptContext};
+pub use agent_exec::{AgentInvocation, AgentRunner, LiveRunner, PromptContext, RemoteRunner};
 
 /// Git filemode for a tree (subdirectory) entry.
 const FILEMODE_TREE: i32 = 0o040000;

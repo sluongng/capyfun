@@ -161,3 +161,64 @@ impl AgentRunner for LiveRunner {
         Ok(())
     }
 }
+
+/// Runs an agent on a REAPI backend (BuildBuddy) instead of locally.
+///
+/// Mirrors [`LiveRunner`] but dispatches the harness invocation to the remote
+/// executor: the workdir subtree becomes the Action input root, the harness runs
+/// on a worker, and the action's output subtree is materialized back into
+/// `workdir` — so the engine's diff→materialize→cache loop is unchanged. The
+/// Action Cache serves repeat runs (see [`crate::remote::executor`]).
+///
+/// Borrows the [`Reapi`](crate::remote::executor::Reapi) client so a fake can be
+/// injected in tests; production passes a
+/// [`RemoteClient`](crate::remote::client::RemoteClient).
+pub struct RemoteRunner<'a> {
+    client: &'a dyn crate::remote::executor::Reapi,
+    /// Platform properties selecting the executor (container image, OS, network).
+    platform: Vec<(String, String)>,
+}
+
+impl<'a> RemoteRunner<'a> {
+    pub fn new(client: &'a dyn crate::remote::executor::Reapi) -> Self {
+        RemoteRunner {
+            client,
+            platform: Vec::new(),
+        }
+    }
+
+    pub fn with_platform(mut self, platform: Vec<(String, String)>) -> Self {
+        self.platform = platform;
+        self
+    }
+}
+
+impl AgentRunner for RemoteRunner<'_> {
+    fn run(&self, inv: &AgentInvocation, prompt: &str, workdir: &Path) -> Result<()> {
+        if inv.harness == HarnessKind::Pi {
+            anyhow::bail!(
+                "agent {} uses the `pi` harness, which cannot edit files; use a CLI \
+                 harness for remote agent_transform execution",
+                inv.agent_id
+            );
+        }
+        // Build the same harness invocation the local runner would, then run it
+        // remotely. The harness binary must exist in the executor image; the
+        // model credential is supplied to the worker out-of-band (a BuildBuddy
+        // secret), never as an env var, so it stays out of the Action digest.
+        let (program, args) = harness_command(inv.harness, Some(&inv.model_id), prompt)?;
+        let mut harness_args = Vec::with_capacity(args.len() + 1);
+        harness_args.push(program);
+        harness_args.extend(args);
+
+        let executor = crate::remote::executor::RemoteExecutor::new(self.client)
+            .with_platform(self.platform.clone());
+        executor
+            .run_in_place(workdir, harness_args, Vec::new(), false)
+            .with_context(|| format!("remote agent {} run", inv.agent_id))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod remote_runner_tests;
