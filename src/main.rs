@@ -31,6 +31,10 @@ enum Command {
     Vendor(ImportArgs),
     /// Publish a monorepo path to a destination remote as a GitHub PR.
     Export(ExportArgs),
+    /// Dry-run reconcile: report each target's desired-vs-actual sync state.
+    Status(StatusArgs),
+    /// Reconcile targets: run the import/vendor/export needed to converge.
+    Reconcile(ReconcileArgs),
     /// Run the automation server: poll GH Archive and host the webhook endpoint.
     Serve(ServeArgs),
     /// Run a coding-agent harness over a prompt (proof of the agent_transform path).
@@ -58,6 +62,32 @@ struct AgentRunArgs {
     /// OpenAI-compatible base URL for the `pi` harness (defaults per provider).
     #[arg(long)]
     base_url: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct StatusArgs {
+    /// Optional single target label to report, e.g. `//third_party/backend:backend`.
+    /// When omitted, every import/vendor/export target is reported.
+    target: Option<String>,
+    /// Monorepo root (the directory holding the root `SRC` file).
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+struct ReconcileArgs {
+    /// Optional single target label to reconcile, e.g. `//third_party/backend:backend`.
+    /// When omitted, every import/vendor/export target is reconciled.
+    target: Option<String>,
+    /// Monorepo root (the directory holding the root `SRC` file).
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Bypass the agent-output cache: re-run every `agent_transform` (imports).
+    #[arg(long)]
+    refresh: bool,
+    /// Push export branches but do not open GitHub PRs (print the `gh` command).
+    #[arg(long)]
+    no_pr: bool,
 }
 
 #[derive(Debug, clap::Args)]
@@ -149,6 +179,8 @@ fn main() -> Result<()> {
         Command::Import(args) => run_import(args),
         Command::Vendor(args) => run_vendor(args),
         Command::Export(args) => run_export(args),
+        Command::Status(args) => run_status(args),
+        Command::Reconcile(args) => run_reconcile(args),
         Command::Serve(args) => run_serve(args),
         Command::AgentRun(args) => run_agent_run(args),
     }
@@ -214,6 +246,94 @@ fn run_serve(args: ServeArgs) -> Result<()> {
     )
 }
 
+fn run_status(args: StatusArgs) -> Result<()> {
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+
+    let repo = git2::Repository::open(&args.root)
+        .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
+
+    let statuses = capyfun::status::status_all(&repo, &ir, args.target.as_deref());
+    if statuses.is_empty() {
+        if let Some(t) = &args.target {
+            bail!("no target labeled `{t}` (run `capyfun config` to list targets)");
+        }
+        println!("no import/vendor/export targets declared");
+        return Ok(());
+    }
+
+    let mut behind = 0;
+    for s in &statuses {
+        println!("{}  {}  {}  {}", s.label, s.kind.as_str(), s.repo, s.summary());
+        if s.state.is_actionable() {
+            behind += 1;
+        }
+    }
+    println!(
+        "\n{} target(s); {} need reconcile",
+        statuses.len(),
+        behind
+    );
+    Ok(())
+}
+
+fn run_reconcile(args: ReconcileArgs) -> Result<()> {
+    let raw = capyfun::config::evaluate(&args.root)?;
+    let ir = capyfun::ir::compile(&raw)
+        .map_err(|diags| anyhow::anyhow!("config is invalid:\n  {}", diags.join("\n  ")))?;
+
+    let repo = git2::Repository::open(&args.root)
+        .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
+
+    let target = args.target.as_deref();
+    let mut matched = 0usize;
+    let mut failed = 0usize;
+
+    // The reconcile is level-triggered: each underlying action is idempotent, so
+    // we simply run the action for every (filtered) target and report the diff it
+    // applied. A failing target is reported but does not abort the others.
+    let mut run = |label: &str, outcome: Result<String>| {
+        matched += 1;
+        match outcome {
+            Ok(summary) => println!("{label}: {summary}"),
+            Err(e) => {
+                failed += 1;
+                eprintln!("{label}: error: {e:#}");
+            }
+        }
+    };
+
+    for i in &ir.imports {
+        if target.is_none_or(|t| t == i.label) {
+            run(&i.label, do_import(&repo, &ir, i, &args.root, args.refresh));
+        }
+    }
+    for v in &ir.vendors {
+        if target.is_none_or(|t| t == v.label) {
+            run(&v.label, do_vendor(&repo, &ir, v));
+        }
+    }
+    for e in &ir.exports {
+        if target.is_none_or(|t| t == e.label) {
+            run(&e.label, do_export(&repo, &ir, e, args.no_pr));
+        }
+    }
+
+    if matched == 0 {
+        if let Some(t) = target {
+            bail!("no target labeled `{t}` (run `capyfun config` to list targets)");
+        }
+        println!("no import/vendor/export targets declared");
+        return Ok(());
+    }
+    if failed > 0 {
+        bail!("{failed} of {matched} target(s) failed to reconcile");
+    }
+    println!("\nreconciled {matched} target(s)");
+    Ok(())
+}
+
 fn run_vendor(args: ImportArgs) -> Result<()> {
     let raw = capyfun::config::evaluate(&args.root)?;
     let ir = capyfun::ir::compile(&raw)
@@ -238,16 +358,27 @@ fn run_vendor(args: ImportArgs) -> Result<()> {
 
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
+
+    let summary = do_vendor(&repo, &ir, vendor)?;
+    println!("{}: {summary}", vendor.label);
+    Ok(())
+}
+
+/// Vendor one pinned snapshot: fetch the declared commit and (re)materialize its
+/// tree into the package, advancing the monorepo branch. Idempotent. Returns a
+/// one-line summary. Shared by the reconciler and the `vendor` command.
+fn do_vendor(
+    repo: &git2::Repository,
+    ir: &capyfun::ir::Ir,
+    vendor: &capyfun::ir::Vendor,
+) -> Result<String> {
     let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
-    let branch_tip = repo
-        .find_reference(&branch_ref)
-        .ok()
-        .and_then(|r| r.target());
+    let branch_tip = repo.find_reference(&branch_ref).ok().and_then(|r| r.target());
 
     let url = origin_url(&vendor.repo);
-    let commit = capyfun::engine::fetch_commit(&repo, &url, &vendor.commit)?;
+    let commit = capyfun::engine::fetch_commit(repo, &url, &vendor.commit)?;
     let outcome =
-        capyfun::engine::vendor_snapshot(&repo, &vendor.dest, &vendor.repo, commit, branch_tip)?;
+        capyfun::engine::vendor_snapshot(repo, &vendor.dest, &vendor.repo, commit, branch_tip)?;
 
     match outcome.head {
         Some(head) if Some(head) != branch_tip => {
@@ -257,14 +388,13 @@ fn run_vendor(args: ImportArgs) -> Result<()> {
                 true,
                 &format!("capyfun vendor {}", vendor.label),
             )?;
-            println!(
-                "vendored {}@{} into {}; {} now {}",
-                vendor.repo, vendor.commit, vendor.dest, branch_ref, head
-            );
+            Ok(format!(
+                "vendored {}@{} into {}; {branch_ref} now {head}",
+                vendor.repo, vendor.commit, vendor.dest
+            ))
         }
-        _ => println!("{} is already vendored at {}", vendor.label, vendor.commit),
+        _ => Ok(format!("already vendored at {}", vendor.commit)),
     }
-    Ok(())
 }
 
 fn run_gen_go(args: GenGoArgs) -> Result<()> {
@@ -590,16 +720,29 @@ fn run_import(args: ImportArgs) -> Result<()> {
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
 
+    let summary = do_import(&repo, &ir, import, &args.root, args.refresh)?;
+    println!("{}: {summary}", import.label);
+    Ok(())
+}
+
+/// Run one import: fetch the origin, (re)apply the mirror + tip layers via the
+/// engine, and advance the monorepo branch. Idempotent — a no-op when there is
+/// nothing new. Returns a one-line summary. The reconciler and the `import`
+/// command share this so their behavior cannot drift.
+fn do_import(
+    repo: &git2::Repository,
+    ir: &capyfun::ir::Ir,
+    import: &capyfun::ir::Import,
+    root: &std::path::Path,
+    refresh: bool,
+) -> Result<String> {
     // Current tip of the monorepo branch we import onto.
     let branch_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
-    let branch_tip = repo
-        .find_reference(&branch_ref)
-        .ok()
-        .and_then(|r| r.target());
+    let branch_tip = repo.find_reference(&branch_ref).ok().and_then(|r| r.target());
 
     // Fetch the origin ref into the monorepo's object store.
     let url = origin_url(&import.repo);
-    let origin_tip = capyfun::engine::fetch_commit(&repo, &url, &import.git_ref)?;
+    let origin_tip = capyfun::engine::fetch_commit(repo, &url, &import.git_ref)?;
 
     // Read the patch series from the working tree.
     let patches = import
@@ -607,7 +750,7 @@ fn run_import(args: ImportArgs) -> Result<()> {
         .iter()
         .map(|p| {
             let bytes =
-                std::fs::read(args.root.join(p)).with_context(|| format!("reading patch {p}"))?;
+                std::fs::read(root.join(p)).with_context(|| format!("reading patch {p}"))?;
             Ok(capyfun::engine::PatchFile {
                 label: p.clone(),
                 bytes,
@@ -618,17 +761,17 @@ fn run_import(args: ImportArgs) -> Result<()> {
     // Resolve the declared tip-phase transforms (ordered: apply_patch +
     // agent_transform) into engine-facing structs. IR resolution and file reads
     // live here so the engine stays decoupled from `ir`.
-    let tips = resolve_tip_transforms(&ir, import, &args.root)?;
+    let tips = resolve_tip_transforms(ir, import, root)?;
 
     let runner = capyfun::engine::LiveRunner;
     let tip_layer = capyfun::engine::TipLayer {
         patches: &patches,
         tips: &tips,
         runner: &runner,
-        refresh: args.refresh,
+        refresh,
     };
     let outcome = capyfun::engine::import(
-        &repo,
+        repo,
         &import.dest,
         origin_tip,
         branch_tip,
@@ -644,19 +787,20 @@ fn run_import(args: ImportArgs) -> Result<()> {
                 true,
                 &format!("capyfun import {}", import.label),
             )?;
-            println!(
-                "imported {} commit(s) for {} into {}; {} now {}",
-                outcome.imported, import.label, import.dest, branch_ref, head
-            );
             let t = &outcome.tip;
-            println!(
-                "tip layer: {} patch commit(s), {} agent commit(s) (cache: {} hit / {} miss)",
-                t.patch_commits, t.agent_commits, t.agent_cache_hits, t.agent_cache_misses
-            );
+            Ok(format!(
+                "imported {} commit(s) into {}; {branch_ref} now {head} \
+                 (tip: {} patch, {} agent, cache {}h/{}m)",
+                outcome.imported,
+                import.dest,
+                t.patch_commits,
+                t.agent_commits,
+                t.agent_cache_hits,
+                t.agent_cache_misses
+            ))
         }
-        _ => println!("{} is already up to date", import.label),
+        _ => Ok("already up to date".to_owned()),
     }
-    Ok(())
 }
 
 /// Resolve an import's declared tip-phase transforms into engine [`TipTransform`]s.
@@ -797,6 +941,22 @@ fn run_export(args: ExportArgs) -> Result<()> {
     let repo = git2::Repository::open(&args.root)
         .with_context(|| format!("opening monorepo at {}", args.root.display()))?;
 
+    let summary = do_export(&repo, &ir, export, args.no_pr)?;
+    println!("{}: {summary}", export.label);
+    Ok(())
+}
+
+/// Run one export: project the monorepo path onto the destination (prefix
+/// stripped, transforms applied), push the export branch, and open a PR (unless
+/// suppressed). Idempotent — a no-op when nothing new has landed. Returns a
+/// one-line summary (it preserves the `already up to date` phrasing). Shared by
+/// the reconciler and the `export` command.
+fn do_export(
+    repo: &git2::Repository,
+    ir: &capyfun::ir::Ir,
+    export: &capyfun::ir::Export,
+    no_pr: bool,
+) -> Result<String> {
     // Current tip of the monorepo branch we export from.
     let mono_ref = format!("refs/heads/{}", ir.monorepo.default_branch);
     let mono_tip = repo
@@ -810,24 +970,23 @@ fn run_export(args: ExportArgs) -> Result<()> {
     // branch yet (a fresh repo) means nothing has shipped.
     let url = origin_url(&export.repo);
     let dest_tip =
-        capyfun::engine::fetch_commit(&repo, &url, &format!("refs/heads/{}", export.branch)).ok();
+        capyfun::engine::fetch_commit(repo, &url, &format!("refs/heads/{}", export.branch)).ok();
 
     let outcome =
-        capyfun::engine::export(&repo, &export.from, mono_tip, dest_tip, &export.transforms)?;
+        capyfun::engine::export(repo, &export.from, mono_tip, dest_tip, &export.transforms)?;
 
     match outcome.head {
         Some(head) if Some(head) != dest_tip => {
             let export_branch = format!("capyfun/export-{}", export.name);
-            capyfun::engine::push_branch(&repo, &url, head, &export_branch)?;
-            println!(
-                "exported {} commit(s) for {} from {}; pushed branch {} to {}",
-                outcome.exported, export.label, export.from, export_branch, export.repo
-            );
-            open_pr(export, &export_branch, args.no_pr)?;
+            capyfun::engine::push_branch(repo, &url, head, &export_branch)?;
+            open_pr(export, &export_branch, no_pr)?;
+            Ok(format!(
+                "exported {} commit(s) from {}; pushed branch {} to {}",
+                outcome.exported, export.from, export_branch, export.repo
+            ))
         }
-        _ => println!("{} is already up to date on {}", export.label, export.repo),
+        _ => Ok(format!("already up to date on {}", export.repo)),
     }
-    Ok(())
 }
 
 /// Open a GitHub PR for a pushed export branch, or explain why it was skipped.
