@@ -43,6 +43,57 @@ This realizes, for free, the invariant in `transformations.md`: generative
 output is "materialized into a content-addressed record so imports remain
 reproducible from that record." On RBE the record *is* the AC entry.
 
+## Reference implementation: the buck2 fork's REAPI stack
+
+`../../../facebook/buck2` (our buck2 fork) ships a production Rust REAPI client we
+mine directly. Concrete findings, with the CapyFun decision each one drives:
+
+- **Crate layout.** buck2 splits the protos (`remote_execution/oss/re_grpc_proto`)
+  from the client (`remote_execution/oss/re_grpc/src/client.rs`, ~`ExecutionClient`).
+  CapyFun is a single crate, so we vendor the protos under `proto/` and compile
+  them in `build.rs`, exposing one `remote` module (`proto` submodule via
+  `tonic::include_proto!`) — no separate crate.
+- **Proto source.** The official `build.bazel.remote.execution.v2` proto plus its
+  google deps (`bytestream`, `longrunning`, `rpc/{status,code}`, `api/*`) and
+  `build.bazel.semver`. We copy the exact set buck2 vendors (verbatim from
+  `bazelbuild/remote-apis`) so we track a known-good snapshot.
+- **Codegen.** `tonic` + `prost` (buck2 uses `tonic` 0.14 / `prost` 0.14). buck2's
+  `build.rs` derives `serde` on messages and remaps the google packages to a
+  shared crate; CapyFun compiles all protos in one `build.rs` pass (no remap
+  needed in a single crate) and skips the serde derive unless a test needs it.
+- **Digest = SHA256.** REAPI digests are `{hash: hex, size_bytes: i64}` over the
+  prost-serialized bytes; BuildBuddy's default instance is SHA256. CapyFun's
+  internal cache uses blake3, but the *REAPI* digest must be **SHA256** — keep
+  the two hashers separate (`sha2` for REAPI, `blake3` for the local store).
+- **Merkle tree.** `directory_to_re_tree` / `create_re_directory`
+  (`app/buck2_execute/src/directory.rs`): each `Directory` lists `files` /
+  `directories` / `symlinks`, **sorted by name** for determinism; a `FileNode`
+  carries `digest` + `is_executable`; a subdir `DirectoryNode` carries the
+  SHA256 of *its* serialized `Directory`. The directory digest is
+  `sha256(prost_encode(Directory))`. CapyFun maps a git tree the same way
+  (blob→FileNode with exec bit from mode `100755`, tree→DirectoryNode, symlink
+  `120000`→SymlinkNode).
+- **Auth.** A tonic `Interceptor` (`InjectHeadersInterceptor`) injects configured
+  metadata headers on every request. BuildBuddy uses
+  **`x-buildbuddy-api-key: <key>`** (confirmed in the fork's
+  `.buckconfig.local` `[buck2_re_client] http_headers`). CapyFun does the same
+  via a tonic interceptor.
+- **Endpoint / TLS.** `grpcs://remote.buildbuddy.io` (TLS, webpki roots). buck2's
+  `prepare_uri` infers TLS from the scheme (`grpcs`/`https` → TLS); CapyFun
+  defaults to TLS for BuildBuddy Cloud.
+- **RPC surface we need.** `ContentAddressableStorage.{FindMissingBlobs,
+  BatchUpdateBlobs,BatchReadBlobs}`, `ActionCache.GetActionResult`,
+  `Execution.{Execute,WaitExecution}` (streaming). buck2 batches small blobs and
+  falls back to `ByteStream` for large ones; CapyFun starts with batch-only and
+  adds ByteStream when a blob exceeds the gRPC message limit.
+
+> **Credential handling (hard rule).** The fork's `.buckconfig.local` contains a
+> live BuildBuddy key. It is **never** copied into CapyFun source, tests, or this
+> doc. CapyFun reads the key from `BUILDBUDDY_API_KEY` (or, as a convenience, the
+> `[buildbuddy] api_key` line of a buck2-style config path passed explicitly) at
+> runtime — mirroring buck2's `$(config buildbuddy.api_key)` indirection. The key
+> never enters the Action digest (see Safety).
+
 ## What this is NOT
 
 - **Not turning CapyFun into Bazel.** CapyFun keeps its own narrow Starlark and
